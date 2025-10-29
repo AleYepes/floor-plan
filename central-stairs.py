@@ -6,10 +6,14 @@ frame = FEModel3D()
 
 # Constants
 room_width = 1870
-room_length = 3000
-floor_height = 2750
+room_length = 3017
+room_height = 5465
+plank_thickness = 25
+floor2floor = room_height/2 + plank_thickness/2
+floor2ceiling = room_height/2 - plank_thickness/2
 beam_base = 60
 beam_height = 120
+floor2beam = floor2ceiling - beam_height
 wall_beam_contact_area = 40
 beam_length = room_width + wall_beam_contact_area # NOT full length, calculated brick' center. Full length == room_width + wall_beam_contact_area * 2
 
@@ -38,10 +42,10 @@ frame.def_support('floor NE', True, True, True, True, True, True)
 frame.def_support('floor NW', True, True, True, True, True, True)
 
 # Wall nodes
-frame.add_node('SE', frame.nodes['floor SE'].X, frame.nodes['floor SE'].Y + floor_height, frame.nodes['floor SE'].Z)
-frame.add_node('NE', frame.nodes['floor NE'].X, frame.nodes['floor NE'].Y + floor_height, frame.nodes['floor NE'].Z)
-frame.add_node('SW', frame.nodes['floor SW'].X, frame.nodes['floor SW'].Y + floor_height, frame.nodes['floor SW'].Z)
-frame.add_node('NW', frame.nodes['floor NW'].X, frame.nodes['floor NW'].Y + floor_height, frame.nodes['floor NW'].Z)
+frame.add_node('SE', frame.nodes['floor SE'].X, frame.nodes['floor SE'].Y + floor2floor, frame.nodes['floor SE'].Z)
+frame.add_node('NE', frame.nodes['floor NE'].X, frame.nodes['floor NE'].Y + floor2floor, frame.nodes['floor NE'].Z)
+frame.add_node('SW', frame.nodes['floor SW'].X, frame.nodes['floor SW'].Y + floor2floor, frame.nodes['floor SW'].Z)
+frame.add_node('NW', frame.nodes['floor NW'].X, frame.nodes['floor NW'].Y + floor2floor, frame.nodes['floor NW'].Z)
 
 # Tail joist
 frame.add_node('tail S', frame.nodes['SW'].X - 680, frame.nodes['SW'].Y, frame.nodes['SW'].Z)

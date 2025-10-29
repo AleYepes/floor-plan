@@ -13,9 +13,11 @@ floor2floor = room_height/2 + plank_thickness/2
 floor2ceiling = room_height/2 - plank_thickness/2
 beam_base = 60
 beam_height = 120
-floor2beam = floor2ceiling - beam_height
+trimmer_base = 80
+trimmer_height = 160
+floor2beam = floor2ceiling - trimmer_height
 wall_beam_contact_area = 40
-beam_length = room_width + wall_beam_contact_area # NOT full length, calculated brick' center. Full length == room_width + wall_beam_contact_area * 2
+beam_length = room_width + wall_beam_contact_area # NOT real beam length. This calculates wall center to wall center.
 
 # Materials
 E = 11000 # MPa (N/mm²)
@@ -31,63 +33,49 @@ rho = 5.45e-7 # kg/mm3
 frame.add_material('brick', E=E, G=G, nu=nu, rho=rho)
 
 # Floor nodes and supports
-frame.add_node('floor SE', beam_base/2, 0, 0)
-frame.add_node('floor NE', beam_base/2, 0, room_width)
-frame.add_node('floor SW', room_length - beam_base/2, 0, 0)
-frame.add_node('floor NW', room_length - beam_base/2, 0, room_width)
-
-frame.def_support('floor SE', True, True, True, True, True, True)
-frame.def_support('floor SW', True, True, True, True, True, True)
-frame.def_support('floor NE', True, True, True, True, True, True)
-frame.def_support('floor NW', True, True, True, True, True, True)
+frame.add_node('floor AS', beam_base/2, 0, 0)
+frame.add_node('floor AN', beam_base/2, 0, room_width)
+# frame.add_node('floor HS', room_length - beam_base/2, 0, 0)
+# frame.add_node('floor HN', room_length - beam_base/2, 0, room_width)
 
 # Wall nodes
-frame.add_node('SE', frame.nodes['floor SE'].X, frame.nodes['floor SE'].Y + floor2floor, frame.nodes['floor SE'].Z)
-frame.add_node('NE', frame.nodes['floor NE'].X, frame.nodes['floor NE'].Y + floor2floor, frame.nodes['floor NE'].Z)
-frame.add_node('SW', frame.nodes['floor SW'].X, frame.nodes['floor SW'].Y + floor2floor, frame.nodes['floor SW'].Z)
-frame.add_node('NW', frame.nodes['floor NW'].X, frame.nodes['floor NW'].Y + floor2floor, frame.nodes['floor NW'].Z)
+frame.add_node('AS', frame.nodes['floor AS'].X, frame.nodes['floor AS'].Y + floor2floor, frame.nodes['floor AS'].Z)
+frame.add_node('AN', frame.nodes['floor AN'].X, frame.nodes['floor AN'].Y + floor2floor, frame.nodes['floor AN'].Z)
+# frame.add_node('HS', frame.nodes['floor HS'].X, frame.nodes['floor HS'].Y + floor2floor, frame.nodes['floor HS'].Z)
+# frame.add_node('HN', frame.nodes['floor HN'].X, frame.nodes['floor HN'].Y + floor2floor, frame.nodes['floor HN'].Z)
 
-# Tail joist
-frame.add_node('tail S', frame.nodes['SW'].X - 680, frame.nodes['SW'].Y, frame.nodes['SW'].Z)
-frame.add_node('floor tail S', frame.nodes['floor SW'].X - 680, frame.nodes['floor SW'].Y, frame.nodes['floor SW'].Z)
-frame.add_node('tail N', frame.nodes['NW'].X - 680, frame.nodes['NW'].Y, frame.nodes['NW'].Z)
-frame.add_node('floor tail N', frame.nodes['floor NW'].X - 680, frame.nodes['floor NW'].Y, frame.nodes['floor NW'].Z)
+# East trimmer
+EAST_TRIMMER_DISTANCE = 912.3 - 30 - 40 # 30 and 40 to center beams
+frame.add_node('trimmer ES', frame.nodes['AS'].X + EAST_TRIMMER_DISTANCE, frame.nodes['AS'].Y, frame.nodes['AS'].Z)
+frame.add_node('floor trimmer ES', frame.nodes['floor AS'].X + EAST_TRIMMER_DISTANCE, frame.nodes['floor AS'].Y, frame.nodes['floor AS'].Z)
+frame.add_node('trimmer EN', frame.nodes['AN'].X + EAST_TRIMMER_DISTANCE, frame.nodes['AN'].Y, frame.nodes['AN'].Z)
+frame.add_node('floor trimmer EN', frame.nodes['floor AN'].X + EAST_TRIMMER_DISTANCE, frame.nodes['floor AN'].Y, frame.nodes['floor AN'].Z)
 
-## Double trimmer
-frame.add_node('double trimmer S', frame.nodes['SW'].X - 1390, frame.nodes['SW'].Y, frame.nodes['SW'].Z)
-frame.add_node('floor double trimmer S', frame.nodes['floor SW'].X - 1390, frame.nodes['floor SW'].Y, frame.nodes['floor SW'].Z)
-frame.add_node('double trimmer N', frame.nodes['NW'].X - 1390, frame.nodes['NW'].Y, frame.nodes['NW'].Z)
-frame.add_node('floor double trimmer N', frame.nodes['floor NW'].X - 1390, frame.nodes['floor NW'].Y, frame.nodes['floor NW'].Z)
+# B
+B_distance = EAST_TRIMMER_DISTANCE / 2
+frame.add_node('BS', frame.nodes['AS'].X + B_distance, frame.nodes['AS'].Y, frame.nodes['AS'].Z)
+frame.add_node('floor BS', frame.nodes['floor AS'].X + B_distance, frame.nodes['floor AS'].Y, frame.nodes['floor AS'].Z)
+frame.add_node('BN', frame.nodes['AN'].X + B_distance, frame.nodes['AN'].Y, frame.nodes['AN'].Z)
+frame.add_node('floor BN', frame.nodes['floor AN'].X + B_distance, frame.nodes['floor AN'].Y, frame.nodes['floor AN'].Z)
 
-# Header
-frame.add_node('header S', frame.nodes['SW'].X, frame.nodes['SW'].Y, frame.nodes['SW'].Z + 555)
-frame.add_node('floor header S', frame.nodes['floor SW'].X, frame.nodes['floor SW'].Y, frame.nodes['floor SW'].Z + 555)
-frame.add_node('header N', frame.nodes['NW'].X, frame.nodes['NW'].Y, frame.nodes['NW'].Z - 555)
-frame.add_node('floor header N', frame.nodes['floor NW'].X, frame.nodes['floor NW'].Y, frame.nodes['floor NW'].Z - 555)
-
-frame.add_node('header-trimmer S', frame.nodes['double trimmer S'].X, frame.nodes['double trimmer S'].Y, frame.nodes['header S'].Z)
-frame.add_node('header-trimmer N', frame.nodes['double trimmer N'].X, frame.nodes['double trimmer N'].Y, frame.nodes['header N'].Z)
-
-frame.add_node('header-tail S', frame.nodes['tail S'].X, frame.nodes['tail S'].Y, frame.nodes['header S'].Z)
-frame.add_node('header-tail N', frame.nodes['tail N'].X, frame.nodes['tail N'].Y, frame.nodes['header N'].Z)
 
 # Wall members
-wall_thickness = 90
-frame.add_quad('south wall 3', 'floor SE', 'floor double trimmer S', 'double trimmer S', 'SE', wall_thickness, 'brick')
-frame.add_quad('south wall 4', 'floor tail S', 'floor double trimmer S', 'double trimmer S', 'tail S', wall_thickness, 'brick')
-frame.add_quad('south wall 5', 'floor SW', 'floor tail S', 'tail S', 'SW', wall_thickness, 'brick')
+wall_thickness = 80
 
-frame.add_quad('north wall 3', 'floor NE', 'floor double trimmer N', 'double trimmer N', 'NE', wall_thickness, 'brick')
-frame.add_quad('north wall 4', 'floor tail N', 'floor double trimmer N', 'double trimmer N', 'tail N', wall_thickness, 'brick')
-frame.add_quad('north wall 5', 'floor NW', 'floor tail N', 'tail N', 'NW', wall_thickness, 'brick')
+frame.add_quad('south wall A', 'floor AS', 'floor BS', 'BS', 'AS', wall_thickness, 'brick')
+frame.add_quad('south wall B', 'floor trimmer ES', 'floor BS', 'BS', 'trimmer ES', wall_thickness, 'brick')
+# frame.add_quad('south wall 5', 'floor HS', 'floor BS', 'BS', 'HS', wall_thickness, 'brick')
 
-frame.add_quad('east wall', 'floor SE', 'floor NE', 'NE', 'SE', wall_thickness, 'brick')
+frame.add_quad('north wall A', 'floor AN', 'floor BN', 'BN', 'AN', wall_thickness, 'brick')
+frame.add_quad('north wall B', 'floor trimmer EN', 'floor BN', 'BN', 'trimmer EN', wall_thickness, 'brick')
+# frame.add_quad('north wall 5', 'floor HN', 'floor BN', 'BN', 'HN', wall_thickness, 'brick')
 
-# frame.add_quad('west wall', 'floor SW', 'floor NW', 'NW', 'SW', wall_thickness, 'brick')
-frame.add_quad('west wall 1', 'floor SW', 'floor header S', 'header S', 'SW', wall_thickness, 'brick')
-frame.add_quad('west wall 2', 'floor header N', 'floor header S', 'header S', 'header N', wall_thickness, 'brick')
-frame.add_quad('west wall 3', 'floor header N', 'floor NW', 'NW', 'header N', wall_thickness, 'brick')
+frame.add_quad('east wall', 'floor AS', 'floor AN', 'AN', 'AS', wall_thickness, 'brick')
 
+
+for node in frame.nodes:
+    if node.startswith('floor'):
+        frame.def_support(node, True, True, True, True, True, True)
 
 # Beam cross-section
 A = beam_base * beam_height
@@ -96,32 +84,27 @@ Iy = (beam_base ** 3 * beam_height) / 12
 Iz = (beam_base * beam_height ** 3) / 12
 frame.add_section('beam', A, Iy, Iz, J)
 
-# Beam members
-frame.add_member('trimmer', 'double trimmer N', 'double trimmer S', 'wood', 'beam')
-frame.add_member('header S', 'header-trimmer S', 'header S', 'wood', 'beam')
-frame.add_member('header N', 'header-trimmer N', 'header N', 'wood', 'beam')
-frame.add_member('tail S', 'header-tail S', 'tail S', 'wood', 'beam')
-frame.add_member('tail N', 'header-tail N', 'tail N', 'wood', 'beam')
+# # Beam members
+frame.add_member('A', 'AN', 'AS', 'wood', 'beam')
+frame.add_member('B', 'BN', 'BS', 'wood', 'beam')
 
 
 # Add loads
 load = -0.003 # N/mm^2  Equivalent to 3000N/m^2
 spacing = 1000
 line_load = load * spacing
-frame.add_member_dist_load('trimmer', 'FY', line_load, line_load)
-frame.add_member_dist_load('header N', 'FY', line_load, line_load)
-frame.add_member_dist_load('header S', 'FY', line_load, line_load)
-
+frame.add_member_dist_load('A', 'FY', line_load, line_load)
+frame.add_member_dist_load('B', 'FY', line_load, line_load)
 
 frame.analyze(check_statics=True)
 
 # # Check the displacement of the top beam node
 # print("Displacement at TR node (DX, DY, DZ):")
-# print(f"({frame.nodes['NW'].DX['Combo 1']:.3f}, {frame.nodes['NW'].DY['Combo 1']:.3f}, {frame.nodes['NW'].DZ['Combo 1']:.3f})")
+# print(f"({frame.nodes['HN'].DX['Combo 1']:.3f}, {frame.nodes['HN'].DY['Combo 1']:.3f}, {frame.nodes['HN'].DZ['Combo 1']:.3f})")
 # print("\nRotation at TR node (RX, RY, RZ):")
-# print(f"({frame.nodes['NW'].RX['Combo 1']:.3f}, {frame.nodes['NW'].RY['Combo 1']:.3f}, {frame.nodes['NW'].RZ['Combo 1']:.3f})")
+# print(f"({frame.nodes['HN'].RX['Combo 1']:.3f}, {frame.nodes['HN'].RY['Combo 1']:.3f}, {frame.nodes['HN'].RZ['Combo 1']:.3f})")
 
-beam = frame.members['trimmer']
+beam = frame.members['A']
 print("\n--- BeamBTR Stats ---")
 print(f"Max Moment (Mz): {beam.max_moment('Mz', 'Combo 1'):.3f} N-mm")
 print(f"Min Moment (Mz): {beam.min_moment('Mz', 'Combo 1'):.3f} N-mm")

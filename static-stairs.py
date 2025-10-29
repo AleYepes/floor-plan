@@ -7,12 +7,13 @@ frame = FEModel3D()
 
 # Constants
 ROOM_WIDTH = 1870
-ROOM_LENGTH = 3017
+ROOM_LENGTH = 3000
 ROOM_HEIGHT = 5465
 PLANK_THICKNESS = 25
 floor2floor = ROOM_HEIGHT/2 + PLANK_THICKNESS/2
 floor2ceiling = ROOM_HEIGHT/2 - PLANK_THICKNESS/2
 beam_base = 60
+double_base = beam_base * 2
 beam_height = 120
 trimmer_base = 80
 trimmer_height = 160
@@ -41,43 +42,44 @@ frame.add_node('floor AN', beam_base/2, 0, beam_length)
 frame.add_node('AN', frame.nodes['floor AN'].X, frame.nodes['floor AN'].Y + floor2floor, frame.nodes['floor AN'].Z)
 
 # East trimmer
-EAST_TRIMMER_DISTANCE = 912.3 - trimmer_base/2 - beam_base/2 # to center beams
-frame.add_node('floor trimmer ES', frame.nodes['floor AS'].X + EAST_TRIMMER_DISTANCE, frame.nodes['floor AS'].Y, frame.nodes['floor AS'].Z)
-frame.add_node('trimmer ES', frame.nodes['AS'].X + EAST_TRIMMER_DISTANCE, frame.nodes['AS'].Y, frame.nodes['AS'].Z)
-frame.add_node('floor trimmer EN', frame.nodes['floor AN'].X + EAST_TRIMMER_DISTANCE, frame.nodes['floor AN'].Y, frame.nodes['floor AN'].Z)
-frame.add_node('trimmer EN', frame.nodes['AN'].X + EAST_TRIMMER_DISTANCE, frame.nodes['AN'].Y, frame.nodes['AN'].Z)
+EAST_TRIMMER_DISTANCE = 820 + trimmer_base/2
+frame.add_node('floor trimmer ES', EAST_TRIMMER_DISTANCE, frame.nodes['floor AS'].Y, frame.nodes['floor AS'].Z)
+frame.add_node('trimmer ES', EAST_TRIMMER_DISTANCE, frame.nodes['AS'].Y, frame.nodes['AS'].Z)
+frame.add_node('floor trimmer EN',  EAST_TRIMMER_DISTANCE, frame.nodes['floor AN'].Y, frame.nodes['floor AN'].Z)
+frame.add_node('trimmer EN', EAST_TRIMMER_DISTANCE, frame.nodes['AN'].Y, frame.nodes['AN'].Z)
 
 # Beam B
-B_distance = (EAST_TRIMMER_DISTANCE - abs((trimmer_base - beam_base)/2)) / 2
-frame.add_node('floor BS', frame.nodes['floor AS'].X + B_distance, frame.nodes['floor AS'].Y, frame.nodes['floor AS'].Z)
-frame.add_node('BS', frame.nodes['AS'].X + B_distance, frame.nodes['AS'].Y, frame.nodes['AS'].Z)
-frame.add_node('floor BN', frame.nodes['floor AN'].X + B_distance, frame.nodes['floor AN'].Y, frame.nodes['floor AN'].Z)
-frame.add_node('BN', frame.nodes['AN'].X + B_distance, frame.nodes['AN'].Y, frame.nodes['AN'].Z)
+B_distance = (EAST_TRIMMER_DISTANCE + abs(trimmer_base - beam_base)) / 2
+frame.add_node('floor BS', B_distance, frame.nodes['floor AS'].Y, frame.nodes['floor AS'].Z)
+frame.add_node('BS', B_distance, frame.nodes['AS'].Y, frame.nodes['AS'].Z)
+frame.add_node('floor BN', B_distance, frame.nodes['floor AN'].Y, frame.nodes['floor AN'].Z)
+frame.add_node('BN', B_distance, frame.nodes['AN'].Y, frame.nodes['AN'].Z)
 
 # West trimmer
-west_trimmer_distance = 1423.7 + EAST_TRIMMER_DISTANCE + trimmer_base # to center beams
-frame.add_node('floor trimmer WS', frame.nodes['floor trimmer ES'].X + west_trimmer_distance, frame.nodes['floor trimmer ES'].Y, frame.nodes['floor trimmer ES'].Z)
-frame.add_node('trimmer WS', frame.nodes['trimmer ES'].X + west_trimmer_distance, frame.nodes['trimmer ES'].Y, frame.nodes['trimmer ES'].Z)
-frame.add_node('floor trimmer WN', frame.nodes['floor trimmer EN'].X + west_trimmer_distance, frame.nodes['floor trimmer EN'].Y, frame.nodes['floor trimmer EN'].Z)
-frame.add_node('trimmer WN', frame.nodes['trimmer EN'].X + west_trimmer_distance, frame.nodes['trimmer EN'].Y, frame.nodes['trimmer EN'].Z)
+OPENING_LENGTH = 1420
+west_trimmer_distance = OPENING_LENGTH + EAST_TRIMMER_DISTANCE + trimmer_base # to center beams
+frame.add_node('floor trimmer WS', west_trimmer_distance, frame.nodes['floor trimmer ES'].Y, frame.nodes['floor trimmer ES'].Z)
+frame.add_node('trimmer WS', west_trimmer_distance, frame.nodes['trimmer ES'].Y, frame.nodes['trimmer ES'].Z)
+frame.add_node('floor trimmer WN', west_trimmer_distance, frame.nodes['floor trimmer EN'].Y, frame.nodes['floor trimmer EN'].Z)
+frame.add_node('trimmer WN',  west_trimmer_distance, frame.nodes['trimmer EN'].Y, frame.nodes['trimmer EN'].Z)
 
 # Tail C
-stair_width = 627
-tail_length = beam_length - stair_width - wall_beam_contact_depth/2
-CD_distance = (west_trimmer_distance - trimmer_base) / 3 + trimmer_base/2
+stair_width = 630
+tail_length = beam_length - stair_width - wall_beam_contact_depth/2 - beam_base
+custom_adjustment_to_round_measures = - 70 ########### Write a function to find closest int
+CD_distance = (west_trimmer_distance - EAST_TRIMMER_DISTANCE - trimmer_base + custom_adjustment_to_round_measures) / 3
 frame.add_node('floor CS', frame.nodes['floor trimmer ES'].X + CD_distance, frame.nodes['floor trimmer ES'].Y, frame.nodes['floor trimmer ES'].Z)
 frame.add_node('CS', frame.nodes['trimmer ES'].X + CD_distance, frame.nodes['trimmer ES'].Y, frame.nodes['trimmer ES'].Z)
 frame.add_node('CN', frame.nodes['trimmer EN'].X + CD_distance, frame.nodes['trimmer EN'].Y, tail_length)
 
 # Tail D
-frame.add_node('floor DS', frame.nodes['floor trimmer ES'].X + CD_distance * 2, frame.nodes['floor trimmer ES'].Y, frame.nodes['floor trimmer ES'].Z)
-frame.add_node('DS', frame.nodes['trimmer ES'].X + CD_distance * 2, frame.nodes['trimmer ES'].Y, frame.nodes['trimmer ES'].Z)
-frame.add_node('DN', frame.nodes['trimmer EN'].X + CD_distance * 2, frame.nodes['trimmer EN'].Y, tail_length)
+frame.add_node('floor DS', frame.nodes['floor trimmer WS'].X - CD_distance, frame.nodes['floor trimmer WS'].Y, frame.nodes['floor trimmer WS'].Z)
+frame.add_node('DS', frame.nodes['trimmer WS'].X - CD_distance, frame.nodes['trimmer WS'].Y, frame.nodes['trimmer WS'].Z)
+frame.add_node('DN', frame.nodes['trimmer WN'].X - CD_distance, frame.nodes['trimmer WN'].Y, tail_length)
 
 # Header
 frame.add_node('header E', frame.nodes['trimmer ES'].X, frame.nodes['trimmer ES'].Y, tail_length)
 frame.add_node('header W', frame.nodes['trimmer WS'].X, frame.nodes['trimmer WS'].Y, tail_length)
-header_length = abs(frame.nodes['trimmer ES'].X - frame.nodes['trimmer WS'].X)
 
 # Beam E
 frame.add_node('floor ES', ROOM_LENGTH - beam_base/2, 0, 0)
@@ -115,6 +117,13 @@ Iy = (beam_base ** 3 * beam_height) / 12
 Iz = (beam_base * beam_height ** 3) / 12
 frame.add_section('beam', A, Iy, Iz, J)
 
+# Beam cross-section
+A = double_base * beam_height
+J = double_base ** 3 * beam_height * ((1/3) - (0.21 * double_base/beam_height * (1 - (double_base ** 4 / (12 * beam_height ** 4)))))
+Iy = (double_base ** 3 * beam_height) / 12
+Iz = (double_base * beam_height ** 3) / 12
+frame.add_section('double beam', A, Iy, Iz, J)
+
 # Trimmer cross-section
 A = trimmer_base * trimmer_height
 J = trimmer_base ** 3 * trimmer_height * ((1/3) - (0.21 * trimmer_base/trimmer_height * (1 - (trimmer_base ** 4 / (12 * trimmer_height ** 4)))))
@@ -127,7 +136,7 @@ frame.add_member('A', 'AN', 'AS', 'wood', 'beam')
 frame.add_member('B', 'BN', 'BS', 'wood', 'beam')
 frame.add_member('trimmer E', 'trimmer EN', 'trimmer ES', 'wood', 'trimmer')
 frame.add_member('trimmer W', 'trimmer WN', 'trimmer WS', 'wood', 'trimmer')
-frame.add_member('header', 'header W', 'header E', 'wood', 'beam')
+frame.add_member('header', 'header W', 'header E', 'wood', 'double beam')
 frame.add_member('C', 'CN', 'CS', 'wood', 'beam')
 frame.add_member('D', 'DN', 'DS', 'wood', 'beam')
 frame.add_member('E', 'EN', 'ES', 'wood', 'beam')
@@ -157,6 +166,7 @@ load_start = stair_width + wall_beam_contact_depth/2 - beam_base/2
 load_end = beam_length - wall_beam_contact_depth/2
 
 print(f'''
+TRIBUTARY AREAS:
     A: {A_trib_width}
     B: {B_trib_width}
     trimmer EE: {trimmerE_trib_widthE}
@@ -168,15 +178,15 @@ print(f'''
     E: {E_trib_width}
       ''')
 
-# frame.add_member_dist_load('A', 'FY', live_load * A_trib_width, live_load * A_trib_width)
-# frame.add_member_dist_load('B', 'FY', live_load * B_trib_width, live_load * B_trib_width)
-# frame.add_member_dist_load('trimmer E', 'FY', live_load * trimmerE_trib_widthE, live_load * trimmerE_trib_widthE)
+frame.add_member_dist_load('A', 'FY', live_load * A_trib_width, live_load * A_trib_width)
+frame.add_member_dist_load('B', 'FY', live_load * B_trib_width, live_load * B_trib_width)
+frame.add_member_dist_load('trimmer E', 'FY', live_load * trimmerE_trib_widthE, live_load * trimmerE_trib_widthE)
 frame.add_member_dist_load('trimmer E', 'FY', live_load * trimmerE_trib_widthW, live_load * trimmerE_trib_widthW, load_start, load_end)
-# frame.add_member_dist_load('C', 'FY', live_load * C_trib_width, live_load * C_trib_width)
-# frame.add_member_dist_load('D', 'FY', live_load * D_trib_width, live_load * D_trib_width)
-# frame.add_member_dist_load('trimmer W', 'FY', live_load * trimmerE_trib_widthE, live_load * trimmerE_trib_widthE, load_start, load_end)
+frame.add_member_dist_load('C', 'FY', live_load * C_trib_width, live_load * C_trib_width)
+frame.add_member_dist_load('D', 'FY', live_load * D_trib_width, live_load * D_trib_width)
+frame.add_member_dist_load('trimmer W', 'FY', live_load * trimmerE_trib_widthE, live_load * trimmerE_trib_widthE, load_start, load_end)
 frame.add_member_dist_load('trimmer W', 'FY', live_load * trimmerE_trib_widthW, live_load * trimmerE_trib_widthW)
-# frame.add_member_dist_load('E', 'FY', live_load * E_trib_width, live_load * E_trib_width)
+frame.add_member_dist_load('E', 'FY', live_load * E_trib_width, live_load * E_trib_width)
 
 
 frame.analyze(check_statics=True)
@@ -196,9 +206,26 @@ for beam in frame.members:
     print(f"Max Deflection (dy): {frame.members[beam].max_deflection('dy', 'Combo 1'):.3f} mm")
     print(f"Min Deflection (dy): {frame.members[beam].min_deflection('dy', 'Combo 1'):.3f} mm")
 
+# rndr = Renderer(frame)
+# rndr.annotation_size = 5
+# rndr.render_loads = True
+# rndr.deformed_shape = True
+# rndr.deformed_scale = 1000
+# # rndr.color_map = 'My' 
+# # rndr.scalar_bar = True
+# rndr.render_model()
+
+
+def make_plates_transparent(plotter):
+  opacity = 0.5
+  for actor in plotter.renderer.actors.values():
+    if actor.prop.representation == 'surface':
+      actor.prop.opacity = opacity
+
 rndr = Renderer(frame)
 rndr.annotation_size = 5
 rndr.render_loads = True
 rndr.deformed_shape = True
 rndr.deformed_scale = 1000
+rndr.post_update_callbacks.append(make_plates_transparent)
 rndr.render_model()

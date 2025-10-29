@@ -1,6 +1,7 @@
 # Units are mm, N, and MPa (N/mm²)
 from Pynite import FEModel3D
 from Pynite.Rendering import Renderer
+# import pandas as pd
 
 frame = FEModel3D()
 
@@ -33,7 +34,7 @@ rho = 5.75e-6
 frame.add_material('brick', E=E, G=G, nu=nu, rho=rho)
 
 
-# A
+# Beam A
 frame.add_node('floor AS', beam_base/2, 0, 0)
 frame.add_node('AS', frame.nodes['floor AS'].X, frame.nodes['floor AS'].Y + floor2floor, frame.nodes['floor AS'].Z)
 frame.add_node('floor AN', beam_base/2, 0, beam_length)
@@ -46,7 +47,7 @@ frame.add_node('trimmer ES', frame.nodes['AS'].X + EAST_TRIMMER_DISTANCE, frame.
 frame.add_node('floor trimmer EN', frame.nodes['floor AN'].X + EAST_TRIMMER_DISTANCE, frame.nodes['floor AN'].Y, frame.nodes['floor AN'].Z)
 frame.add_node('trimmer EN', frame.nodes['AN'].X + EAST_TRIMMER_DISTANCE, frame.nodes['AN'].Y, frame.nodes['AN'].Z)
 
-# B
+# Beam B
 B_distance = (EAST_TRIMMER_DISTANCE - abs((trimmer_base - beam_base)/2)) / 2
 frame.add_node('floor BS', frame.nodes['floor AS'].X + B_distance, frame.nodes['floor AS'].Y, frame.nodes['floor AS'].Z)
 frame.add_node('BS', frame.nodes['AS'].X + B_distance, frame.nodes['AS'].Y, frame.nodes['AS'].Z)
@@ -54,13 +55,13 @@ frame.add_node('floor BN', frame.nodes['floor AN'].X + B_distance, frame.nodes['
 frame.add_node('BN', frame.nodes['AN'].X + B_distance, frame.nodes['AN'].Y, frame.nodes['AN'].Z)
 
 # West trimmer
-west_trimmer_distance = 1423.7 + trimmer_base # to center beams
+west_trimmer_distance = 1423.7 + EAST_TRIMMER_DISTANCE + trimmer_base # to center beams
 frame.add_node('floor trimmer WS', frame.nodes['floor trimmer ES'].X + west_trimmer_distance, frame.nodes['floor trimmer ES'].Y, frame.nodes['floor trimmer ES'].Z)
 frame.add_node('trimmer WS', frame.nodes['trimmer ES'].X + west_trimmer_distance, frame.nodes['trimmer ES'].Y, frame.nodes['trimmer ES'].Z)
 frame.add_node('floor trimmer WN', frame.nodes['floor trimmer EN'].X + west_trimmer_distance, frame.nodes['floor trimmer EN'].Y, frame.nodes['floor trimmer EN'].Z)
 frame.add_node('trimmer WN', frame.nodes['trimmer EN'].X + west_trimmer_distance, frame.nodes['trimmer EN'].Y, frame.nodes['trimmer EN'].Z)
 
-# C
+# Tail C
 stair_width = 627
 tail_length = beam_length - stair_width - wall_beam_contact_depth/2
 CD_distance = (west_trimmer_distance - trimmer_base) / 3 + trimmer_base/2
@@ -68,7 +69,7 @@ frame.add_node('floor CS', frame.nodes['floor trimmer ES'].X + CD_distance, fram
 frame.add_node('CS', frame.nodes['trimmer ES'].X + CD_distance, frame.nodes['trimmer ES'].Y, frame.nodes['trimmer ES'].Z)
 frame.add_node('CN', frame.nodes['trimmer EN'].X + CD_distance, frame.nodes['trimmer EN'].Y, tail_length)
 
-# D
+# Tail D
 frame.add_node('floor DS', frame.nodes['floor trimmer ES'].X + CD_distance * 2, frame.nodes['floor trimmer ES'].Y, frame.nodes['floor trimmer ES'].Z)
 frame.add_node('DS', frame.nodes['trimmer ES'].X + CD_distance * 2, frame.nodes['trimmer ES'].Y, frame.nodes['trimmer ES'].Z)
 frame.add_node('DN', frame.nodes['trimmer EN'].X + CD_distance * 2, frame.nodes['trimmer EN'].Y, tail_length)
@@ -78,7 +79,7 @@ frame.add_node('header E', frame.nodes['trimmer ES'].X, frame.nodes['trimmer ES'
 frame.add_node('header W', frame.nodes['trimmer WS'].X, frame.nodes['trimmer WS'].Y, tail_length)
 header_length = abs(frame.nodes['trimmer ES'].X - frame.nodes['trimmer WS'].X)
 
-# E
+# Beam E
 frame.add_node('floor ES', ROOM_LENGTH - beam_base/2, 0, 0)
 frame.add_node('floor EN', ROOM_LENGTH - beam_base/2, 0, beam_length)
 frame.add_node('ES', frame.nodes['floor ES'].X, frame.nodes['floor ES'].Y + floor2floor, frame.nodes['floor ES'].Z)
@@ -131,14 +132,52 @@ frame.add_member('C', 'CN', 'CS', 'wood', 'beam')
 frame.add_member('D', 'DN', 'DS', 'wood', 'beam')
 frame.add_member('E', 'EN', 'ES', 'wood', 'beam')
 
+# # Joist dead loads
+# for member in frame.members:
+#     dead_line_load = (-frame.materials['wood'].rho * frame.sections[frame.members[member].section.name].A)
+#     frame.add_member_dist_load(member, 'FY', dead_line_load, dead_line_load)
 
-# Add dead loads
-for member in frame.members:
-    line_load = (-frame.materials['wood'].rho * frame.sections[frame.members[member].section.name].A)
-    frame.add_member_dist_load(member, 'FY', line_load, line_load)
+# Tributary areas
+A_trib_width = (beam_base / 2) + (frame.nodes['BS'].X - frame.nodes['AS'].X) / 2
+B_trib_width = (frame.nodes['BS'].X - frame.nodes['AS'].X) / 2 + (frame.nodes['trimmer ES'].X - frame.nodes['BS'].X) / 2
+trimmerE_trib_widthE = (frame.nodes['trimmer ES'].X - frame.nodes['BS'].X) / 2
+trimmerE_trib_widthW = (frame.nodes['CS'].X - frame.nodes['trimmer ES'].X) / 2
+C_trib_width = (frame.nodes['CS'].X - frame.nodes['trimmer ES'].X) / 2 + (frame.nodes['DS'].X - frame.nodes['CS'].X) / 2
+D_trib_width = (frame.nodes['DS'].X - frame.nodes['CS'].X) / 2 + (frame.nodes['trimmer WS'].X - frame.nodes['DS'].X) / 2
+trimmerW_trib_widthE = (frame.nodes['trimmer WS'].X - frame.nodes['DS'].X) / 2
+trimmerW_trib_widthW = (frame.nodes['ES'].X - frame.nodes['trimmer WS'].X) / 2
+E_trib_width = (frame.nodes['ES'].X - frame.nodes['trimmer WS'].X) / 2 + (beam_base / 2)
 
 # Add live loads
-live_load = -0.003 # N/mm^2
+live_load = -0.003
+# dead_line_load = -frame.materials['wood'].rho * frame.sections['beam'].A
+# live_line_load = live_load * A_trib_width
+
+load_start = stair_width + wall_beam_contact_depth/2 - beam_base/2
+load_end = beam_length - wall_beam_contact_depth/2
+
+print(f'''
+    A: {A_trib_width}
+    B: {B_trib_width}
+    trimmer EE: {trimmerE_trib_widthE}
+    trimmer EW: {trimmerE_trib_widthW}
+    C: {C_trib_width}
+    D: {D_trib_width}
+    trimmer WE: {trimmerW_trib_widthE}
+    trimmer WW: {trimmerW_trib_widthW}
+    E: {E_trib_width}
+      ''')
+
+# frame.add_member_dist_load('A', 'FY', live_load * A_trib_width, live_load * A_trib_width)
+# frame.add_member_dist_load('B', 'FY', live_load * B_trib_width, live_load * B_trib_width)
+# frame.add_member_dist_load('trimmer E', 'FY', live_load * trimmerE_trib_widthE, live_load * trimmerE_trib_widthE)
+frame.add_member_dist_load('trimmer E', 'FY', live_load * trimmerE_trib_widthW, live_load * trimmerE_trib_widthW, load_start, load_end)
+# frame.add_member_dist_load('C', 'FY', live_load * C_trib_width, live_load * C_trib_width)
+# frame.add_member_dist_load('D', 'FY', live_load * D_trib_width, live_load * D_trib_width)
+# frame.add_member_dist_load('trimmer W', 'FY', live_load * trimmerE_trib_widthE, live_load * trimmerE_trib_widthE, load_start, load_end)
+frame.add_member_dist_load('trimmer W', 'FY', live_load * trimmerE_trib_widthW, live_load * trimmerE_trib_widthW)
+# frame.add_member_dist_load('E', 'FY', live_load * E_trib_width, live_load * E_trib_width)
+
 
 frame.analyze(check_statics=True)
 
@@ -148,20 +187,18 @@ frame.analyze(check_statics=True)
 # print("\nRotation at TR node (RX, RY, RZ):")
 # print(f"({frame.nodes['HN'].RX['Combo 1']:.3f}, {frame.nodes['HN'].RY['Combo 1']:.3f}, {frame.nodes['HN'].RZ['Combo 1']:.3f})")
 
-# print(frame.members['trimmer E'].plot_moment('Mz', 'Combo 1'))
-
-beam = frame.members['A']
-print("\n--- BeamBTR Stats ---")
-print(f"Max Moment (Mz): {beam.max_moment('Mz', 'Combo 1'):.3f} N-mm")
-print(f"Min Moment (Mz): {beam.min_moment('Mz', 'Combo 1'):.3f} N-mm")
-print(f"Max Shear (Fy): {beam.max_shear('Fy', 'Combo 1'):.3f} N")
-print(f"Min Shear (Fy): {beam.min_shear('Fy', 'Combo 1'):.3f} N")
-print(f"Max Deflection (dy): {beam.max_deflection('dy', 'Combo 1'):.3f} mm")
-print(f"Min Deflection (dy): {beam.min_deflection('dy', 'Combo 1'):.3f} mm")
+for beam in frame.members:
+    print(f"\n--- {beam} Stats ---")
+    print(f"Max Moment (Mz): {frame.members[beam].max_moment('Mz', 'Combo 1'):.3f} N-mm")
+    print(f"Min Moment (Mz): {frame.members[beam].min_moment('Mz', 'Combo 1'):.3f} N-mm")
+    print(f"Max Shear (Fy): {frame.members[beam].max_shear('Fy', 'Combo 1'):.3f} N")
+    print(f"Min Shear (Fy): {frame.members[beam].min_shear('Fy', 'Combo 1'):.3f} N")
+    print(f"Max Deflection (dy): {frame.members[beam].max_deflection('dy', 'Combo 1'):.3f} mm")
+    print(f"Min Deflection (dy): {frame.members[beam].min_deflection('dy', 'Combo 1'):.3f} mm")
 
 rndr = Renderer(frame)
 rndr.annotation_size = 5
 rndr.render_loads = True
 rndr.deformed_shape = True
-rndr.deformed_scale = 10000
+rndr.deformed_scale = 1000
 rndr.render_model()

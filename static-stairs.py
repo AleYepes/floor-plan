@@ -25,7 +25,7 @@ beam_length = ROOM_WIDTH + wall_beam_contact_depth # NOT real beam length. This 
 E = 11000 # MPa (N/mm²)
 nu = 0.3
 G = E / (2 * (1 + nu))  # MPa (N/mm²)
-rho = 5.9e-6
+rho = 4.51e-6
 frame.add_material('wood', E=E, G=G, nu=nu, rho=rho)
 
 E = 7000 # MPa (N/mm²)
@@ -97,7 +97,7 @@ frame.add_quad('south wall AB', 'floor AS', 'floor BS', 'BS', 'AS', wall_thickne
 frame.add_quad('south wall Btrimmer', 'floor trimmer ES', 'floor BS', 'BS', 'trimmer ES', wall_thickness, 'brick')
 frame.add_quad('south wall trimmerC', 'floor trimmer ES', 'floor CS', 'CS', 'trimmer ES', wall_thickness, 'brick')
 frame.add_quad('south wall CD', 'floor DS', 'floor CS', 'CS', 'DS', wall_thickness, 'brick')
-frame.add_quad('south wall Dtrimmer', 'floor trimmer WS', 'floor CS', 'CS', 'trimmer WS', wall_thickness, 'brick')
+frame.add_quad('south wall Dtrimmer', 'floor trimmer WS', 'floor DS', 'DS', 'trimmer WS', wall_thickness, 'brick')
 frame.add_quad('south wall trimmerE', 'floor trimmer WS', 'floor ES', 'ES', 'trimmer WS', wall_thickness, 'brick')
 
 frame.add_quad('north wall AB', 'floor AN', 'floor BN', 'BN', 'AN', wall_thickness, 'brick')
@@ -141,10 +141,11 @@ frame.add_member('C', 'CN', 'CS', 'wood', 'beam')
 frame.add_member('D', 'DN', 'DS', 'wood', 'beam')
 frame.add_member('E', 'EN', 'ES', 'wood', 'beam')
 
-# # Joist dead loads
-# for member in frame.members:
-#     dead_line_load = (-frame.materials['wood'].rho * frame.sections[frame.members[member].section.name].A)
-#     frame.add_member_dist_load(member, 'FY', dead_line_load, dead_line_load)
+# Joist dead loads
+for member in frame.members:
+    dead_line_load = (-frame.materials['wood'].rho * frame.sections[frame.members[member].section.name].A)
+    print(f'{member}: {dead_line_load}')
+    frame.add_member_dist_load(member, 'FY', dead_line_load, dead_line_load)
 
 # Tributary areas
 A_trib_width = (beam_base / 2) + (frame.nodes['BS'].X - frame.nodes['AS'].X) / 2
@@ -156,14 +157,6 @@ D_trib_width = (frame.nodes['DS'].X - frame.nodes['CS'].X) / 2 + (frame.nodes['t
 trimmerW_trib_widthE = (frame.nodes['trimmer WS'].X - frame.nodes['DS'].X) / 2
 trimmerW_trib_widthW = (frame.nodes['ES'].X - frame.nodes['trimmer WS'].X) / 2
 E_trib_width = (frame.nodes['ES'].X - frame.nodes['trimmer WS'].X) / 2 + (beam_base / 2)
-
-# Add live loads
-live_load = -0.003
-# dead_line_load = -frame.materials['wood'].rho * frame.sections['beam'].A
-# live_line_load = live_load * A_trib_width
-
-load_start = stair_width + wall_beam_contact_depth/2 - beam_base/2
-load_end = beam_length - wall_beam_contact_depth/2
 
 print(f'''
 TRIBUTARY AREAS:
@@ -178,6 +171,12 @@ TRIBUTARY AREAS:
     E: {E_trib_width}
       ''')
 
+# Add live loads
+live_load = -0.003
+
+load_start = stair_width + wall_beam_contact_depth/2 - beam_base/2
+load_end = beam_length - wall_beam_contact_depth/2
+
 frame.add_member_dist_load('A', 'FY', live_load * A_trib_width, live_load * A_trib_width)
 frame.add_member_dist_load('B', 'FY', live_load * B_trib_width, live_load * B_trib_width)
 frame.add_member_dist_load('trimmer E', 'FY', live_load * trimmerE_trib_widthE, live_load * trimmerE_trib_widthE)
@@ -188,14 +187,7 @@ frame.add_member_dist_load('trimmer W', 'FY', live_load * trimmerE_trib_widthE, 
 frame.add_member_dist_load('trimmer W', 'FY', live_load * trimmerE_trib_widthW, live_load * trimmerE_trib_widthW)
 frame.add_member_dist_load('E', 'FY', live_load * E_trib_width, live_load * E_trib_width)
 
-
 frame.analyze(check_statics=True)
-
-# # Check the displacement of the top beam node
-# print("Displacement at TR node (DX, DY, DZ):")
-# print(f"({frame.nodes['HN'].DX['Combo 1']:.3f}, {frame.nodes['HN'].DY['Combo 1']:.3f}, {frame.nodes['HN'].DZ['Combo 1']:.3f})")
-# print("\nRotation at TR node (RX, RY, RZ):")
-# print(f"({frame.nodes['HN'].RX['Combo 1']:.3f}, {frame.nodes['HN'].RY['Combo 1']:.3f}, {frame.nodes['HN'].RZ['Combo 1']:.3f})")
 
 for beam in frame.members:
     print(f"\n--- {beam} Stats ---")
@@ -206,26 +198,19 @@ for beam in frame.members:
     print(f"Max Deflection (dy): {frame.members[beam].max_deflection('dy', 'Combo 1'):.3f} mm")
     print(f"Min Deflection (dy): {frame.members[beam].min_deflection('dy', 'Combo 1'):.3f} mm")
 
+
+# def set_wall_opacity(plotter, opacity=0.5):  
+#   for actor in plotter.renderer.actors.values():
+#     if (hasattr(actor, 'mapper') and
+#         hasattr(actor.mapper, 'dataset') and
+#         actor.mapper.dataset.n_faces_strict > 0):
+#       actor.prop.opacity = opacity
+
 # rndr = Renderer(frame)
 # rndr.annotation_size = 5
 # rndr.render_loads = True
 # rndr.deformed_shape = True
 # rndr.deformed_scale = 1000
-# # rndr.color_map = 'My' 
-# # rndr.scalar_bar = True
+# opacity = .25
+# rndr.post_update_callbacks.append(lambda plotter: set_wall_opacity(plotter, opacity=opacity))
 # rndr.render_model()
-
-
-def make_plates_transparent(plotter):
-  opacity = 0.5
-  for actor in plotter.renderer.actors.values():
-    if actor.prop.representation == 'surface':
-      actor.prop.opacity = opacity
-
-rndr = Renderer(frame)
-rndr.annotation_size = 5
-rndr.render_loads = True
-rndr.deformed_shape = True
-rndr.deformed_scale = 1000
-rndr.post_update_callbacks.append(make_plates_transparent)
-rndr.render_model()

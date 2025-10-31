@@ -9,7 +9,8 @@ ROOM_LENGTH = 3000
 ROOM_wid = 1870
 ROOM_HEIGHT = 5465
 PLANK_THICKNESS = 25
-OPENING_CLEAR_WIDTH = 630  # Clear span between trimmer inner faces
+OPENING_WIDTH = 630
+OPENING_LENGTH = 1420 # Clear span between trimmer inner faces
 WALL_BEAM_CONTACT_DEPTH = 40
 
 floor2floor = ROOM_HEIGHT / 2 + PLANK_THICKNESS / 2
@@ -103,7 +104,7 @@ class FloorPlanHyperparameters:
         assert self.east_joists.padding <= max_east_padding, \
             f"East padding {self.east_joists.padding} exceeds max {max_east_padding}"
         
-        opening_x_end = self.opening_x_start + OPENING_CLEAR_WIDTH
+        opening_x_end = self.opening_x_start + OPENING_LENGTH
         max_west_padding = ROOM_LENGTH - opening_x_end - self.trimmers.base - self.west_joists.base
         assert self.west_joists.padding <= max_west_padding, \
             f"West padding {self.west_joists.padding} exceeds max {max_west_padding}"
@@ -115,15 +116,15 @@ class GeometryResolver:
         params.validate()
         
         self.opening_x_start = params.opening_x_start
-        self.opening_x_end = self.opening_x_start + OPENING_CLEAR_WIDTH
+        self.opening_x_end = self.opening_x_start + OPENING_LENGTH
         
         self.trimmer_E_x_center = self.opening_x_start - (self.params.trimmers.base / 2)
         self.trimmer_W_x_center = self.opening_x_end + (self.params.trimmers.base / 2)
         
-        self.tail_z_end = beam_length - OPENING_CLEAR_WIDTH - WALL_BEAM_CONTACT_DEPTH/2 - params.header.base/2
+        self.tail_z_end = beam_length - OPENING_WIDTH - WALL_BEAM_CONTACT_DEPTH/2 - params.header.base/2
         self.header_z_pos = self.tail_z_end
         
-        self.opening_z_start = OPENING_CLEAR_WIDTH + WALL_BEAM_CONTACT_DEPTH/2
+        self.opening_z_start = OPENING_WIDTH + WALL_BEAM_CONTACT_DEPTH/2
 
     def _resolve_joist_positions(self, n: int, clear_start: float, clear_end: float, beam_base: float, group: str) -> List[float]:
         if group == 'east':
@@ -209,7 +210,6 @@ class LayoutManager:
         self._is_sorted = False
 
     def add_beams(self, placements: List[BeamPlacement]):
-        """Add multiple beam placements"""
         self.beams.extend(placements)
         self._is_sorted = False
 
@@ -218,7 +218,6 @@ class LayoutManager:
         self._is_sorted = True
     
     def apply_dead_loads(self, frame: FEModel3D):
-        """Apply self-weight dead loads to all members"""
         for p in self.beams:
             section = frame.sections[p.spec.section_name]
             material = frame.materials[p.spec.material]
@@ -226,7 +225,6 @@ class LayoutManager:
             frame.add_member_dist_load(p.spec.name, 'FY', dead_load, dead_load)
     
     def apply_live_loads(self, frame: FEModel3D, live_load_mpa: float, opening_z_start: float):
-        """Apply tributary area live loads to joists and tail joists"""
         if not self._is_sorted or len(self.beams) < 2:
             return
 
@@ -346,23 +344,16 @@ def generate_and_analyze_floor(params: FloorPlanHyperparameters) -> tuple:
     layout = LayoutManager(room_length=ROOM_LENGTH)
     for group_placements in placement_groups.values():
         layout.add_beams(group_placements)
-    
     layout.sort_beams()
-    
-    # Add beams to frame (creates nodes and members)
     for beam_placement in layout.beams:
         beam_placement.add_to_frame(frame, floor2floor, beam_length)
     
-    # Add header with nodes at trimmer positions
-    header_spec = BeamSpec('header', params.header.base, params.header.height, 
-                          params.header.material, 'header', name='header')
+    header_spec = BeamSpec('header', params.header.base, params.header.height, params.header.material, 'header', name='header')
     header_spec.create_section(frame)
-    
     frame.add_node('header_E', resolver.trimmer_E_x_center, floor2floor, resolver.header_z_pos)
     frame.add_node('header_W', resolver.trimmer_W_x_center, floor2floor, resolver.header_z_pos)
     frame.add_member('header', 'header_W', 'header_E', header_spec.material, header_spec.section_name)
     
-    # Now create tail joist members that connect to header
     for tail_placement in placement_groups['tail']:
         tail_node_name = f"{tail_placement.spec.name}_header"
         frame.add_node(tail_node_name, tail_placement.x_center, floor2floor, resolver.header_z_pos)
@@ -375,16 +366,11 @@ def generate_and_analyze_floor(params: FloorPlanHyperparameters) -> tuple:
         )
     
     auto_add_walls(frame, layout, wall_thickness=80, material='brick')
-    
-    # Define supports at all floor nodes
     for node_name in frame.nodes:
         if node_name.startswith('floor'):
             frame.def_support(node_name, True, True, True, True, True, True)
     
-    # Apply loads
     layout.apply_dead_loads(frame)
-    
-    # Header dead load
     header_section = frame.sections[header_spec.section_name]
     header_material = frame.materials[header_spec.material]
     header_dead_load = -header_section.A * header_material.rho
@@ -393,10 +379,7 @@ def generate_and_analyze_floor(params: FloorPlanHyperparameters) -> tuple:
     # FIXED: Use negative live load and pass opening_z_start
     layout.apply_live_loads(frame, live_load_mpa=-0.003, opening_z_start=resolver.opening_z_start)
     
-    # Analyze
     frame.analyze(check_statics=True)
-    
-    # Extract results
     max_header_deflection = abs(frame.members['header'].min_deflection('dy', 'Combo 1'))
     
     total_mass = sum(
@@ -404,7 +387,6 @@ def generate_and_analyze_floor(params: FloorPlanHyperparameters) -> tuple:
         for m in frame.members.values()
     )
     
-    # Find maximum deflection across all members
     max_deflection_overall = 0
     worst_member = None
     for member_name, member in frame.members.items():

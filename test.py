@@ -5,15 +5,15 @@ import numpy as np
 from Pynite.Rendering import Renderer
 
 # Room and opening constants (units: mm, N, MPa)
-ROOM_LENGTH = 3000
-ROOM_wid = 1870
+ROOM_WIDTH = 3000
+ROOM_LENGTH = 1870
 ROOM_HEIGHT = 5465
 PLANK_THICKNESS = 25
 OPENING_CLEAR_WIDTH = 630  # Clear span between trimmer inner faces
 WALL_BEAM_CONTACT_DEPTH = 40
 
 floor2floor = ROOM_HEIGHT / 2 + PLANK_THICKNESS / 2
-beam_length = ROOM_wid + WALL_BEAM_CONTACT_DEPTH
+beam_length = ROOM_LENGTH + WALL_BEAM_CONTACT_DEPTH
 
 # Material properties database
 MATERIALS = {
@@ -63,9 +63,12 @@ class BeamPlacement:
         z_end = self.z_end if self.z_end is not None else default_z_end
         name = self.spec.name
 
+        # Create floor nodes (supports)
+        frame.add_node(f'floor {name}S', self.x_center, 0, self.z_start)
         if self.spec.beam_type != 'tail':
             frame.add_node(f'floor {name}N', self.x_center, 0, z_end)
-        frame.add_node(f'floor {name}S', self.x_center, 0, self.z_start)
+        
+        # Create upper nodes
         frame.add_node(f'{name}S', self.x_center, floor2floor, self.z_start)
         
         if self.spec.beam_type != 'tail':
@@ -73,6 +76,7 @@ class BeamPlacement:
             self.spec.create_section(frame)
             frame.add_member(name, f'{name}N', f'{name}S', self.spec.material, self.spec.section_name)
         else:
+            # Tail joists - member will be created after header nodes exist
             self.spec.create_section(frame)
 
 
@@ -95,6 +99,7 @@ class FloorPlanHyperparameters:
     opening_x_start: float  # X-position where opening starts (east trimmer INNER face)
     
     def validate(self):
+        """Validate hyperparameter constraints"""
         assert self.trimmers.quantity == 2, "Must have exactly 2 trimmers"
         assert self.header.quantity == 1, "Must have exactly 1 header"
         
@@ -104,7 +109,7 @@ class FloorPlanHyperparameters:
             f"East padding {self.east_joists.padding} exceeds max {max_east_padding}"
         
         opening_x_end = self.opening_x_start + OPENING_CLEAR_WIDTH
-        max_west_padding = ROOM_LENGTH - opening_x_end - self.trimmers.base - self.west_joists.base
+        max_west_padding = ROOM_WIDTH - opening_x_end - self.trimmers.base - self.west_joists.base
         assert self.west_joists.padding <= max_west_padding, \
             f"West padding {self.west_joists.padding} exceeds max {max_west_padding}"
 
@@ -114,37 +119,44 @@ class GeometryResolver:
         self.params = params
         params.validate()
         
+        # Opening geometry - inner faces of trimmers define the clear opening
         self.opening_x_start = params.opening_x_start
         self.opening_x_end = self.opening_x_start + OPENING_CLEAR_WIDTH
         
+        # Trimmer centerlines: offset by half their width from their inner faces
         self.trimmer_E_x_center = self.opening_x_start - (self.params.trimmers.base / 2)
         self.trimmer_W_x_center = self.opening_x_end + (self.params.trimmers.base / 2)
         
-        self.tail_z_end = beam_length - OPENING_CLEAR_WIDTH - WALL_BEAM_CONTACT_DEPTH/2 - params.header.base/2
-        self.header_z_pos = self.tail_z_end
+        # FIXED: Calculate tail joist length and header position correctly
+        # Tail joists start at south wall and end where header will be placed
+        # Header position is calculated based on tail joist length
+        joist_base = params.tail_joists.base  # Use tail joist width
+        self.tail_z_end = beam_length - OPENING_CLEAR_WIDTH - WALL_BEAM_CONTACT_DEPTH/2 - joist_base
+        self.header_z_pos = self.tail_z_end  # Header is at same Z as tail joist ends
         
+        # Calculate opening_z_start for load application
         self.opening_z_start = OPENING_CLEAR_WIDTH + WALL_BEAM_CONTACT_DEPTH/2
 
-    def _resolve_joist_positions(self, n: int, clear_start: float, clear_end: float, beam_base: float, group: str) -> List[float]:
-        if group == 'east':
-            centerline_start = clear_start + beam_base / 2
-            centerline_end = clear_end + beam_base / 2
-            positions = np.linspace(centerline_start, centerline_end, n+1).tolist()
-            return positions[:-1]
-        elif group == 'west':
-            centerline_start = clear_start - beam_base / 2
-            centerline_end = clear_end + beam_base / 2
-            positions = np.linspace(centerline_end, centerline_start, n+1).tolist()
-            return positions[:-1]
-        elif group == 'tail':
-            centerline_start = clear_start - beam_base / 2
-            centerline_end = clear_end + beam_base / 2
-            positions = np.linspace(centerline_start, centerline_end, n+2).tolist()
-            return positions[1:-1]
-        else:
-            raise ValueError("Invalid group specified")
+    def _resolve_joist_positions(self, n: int, clear_start: float, clear_end: float, 
+                                  beam_base: float) -> List[float]:
+        """
+        Calculate centerline positions for n joists in a clear span.
+        clear_start and clear_end define the boundaries (walls or adjacent beam faces).
+        """
+        if n == 0:
+            return []
+        
+        # Convert clear span to centerline span
+        centerline_start = clear_start + beam_base / 2
+        centerline_end = clear_end - beam_base / 2
+        
+        if n == 1:
+            return [(centerline_start + centerline_end) / 2]
+        
+        return np.linspace(centerline_start, centerline_end, n).tolist()
 
     def resolve_all_placements(self) -> Dict[str, List[BeamPlacement]]:
+        """Returns dict with keys: 'east', 'west', 'tail', 'trimmers' for organized access"""
         placements = {
             'east': [],
             'west': [],
@@ -152,59 +164,82 @@ class GeometryResolver:
             'trimmers': []
         }
         
-        # East joists
+        # East joists: from padding to east trimmer's east face
         if self.params.east_joists.quantity > 0:
-            joist_spec_east = BeamSpec('joist', self.params.east_joists.base, self.params.east_joists.height, self.params.east_joists.material, 'joist')
+            joist_spec_east = BeamSpec('joist', self.params.east_joists.base, 
+                                      self.params.east_joists.height, 
+                                      self.params.east_joists.material, 'joist')
+            
             clear_start = self.params.east_joists.padding
             clear_end = self.trimmer_E_x_center - self.params.trimmers.base / 2
-            east_positions = self._resolve_joist_positions(self.params.east_joists.quantity, 
-                                                           clear_start, 
-                                                           clear_end, 
-                                                           joist_spec_east.base,
-                                                           "east"
-                                                           )
+            
+            east_positions = self._resolve_joist_positions(
+                self.params.east_joists.quantity, clear_start, clear_end, 
+                joist_spec_east.base
+            )
+            
             for i, x in enumerate(east_positions):
-                placements['east'].append(BeamPlacement(spec=joist_spec_east.copy(name=f'E{i}'), x_center=x))
+                placements['east'].append(
+                    BeamPlacement(spec=joist_spec_east.copy(name=f'E{i}'), x_center=x)
+                )
         
-        # Tail joints
-        if self.params.tail_joists.quantity > 0:
-            tail_spec = BeamSpec('tail', self.params.tail_joists.base, self.params.tail_joists.height, self.params.tail_joists.material, 'tail')
-            clear_start = self.opening_x_start + self.params.tail_joists.padding
-            clear_end = self.opening_x_end - self.params.tail_joists.padding
-            tail_positions = self._resolve_joist_positions(self.params.tail_joists.quantity, 
-                                                           clear_start, 
-                                                           clear_end, 
-                                                           tail_spec.base,
-                                                           "tail"
-                                                           )
-            for i, x in enumerate(tail_positions):
-                placements['tail'].append(BeamPlacement(spec=tail_spec.copy(name=f'T{i}'), x_center=x, z_end=self.tail_z_end))
-        
-        # West joists
-        if self.params.west_joists.quantity > 0:
-            joist_spec_west = BeamSpec('joist', self.params.west_joists.base, self.params.west_joists.height, self.params.west_joists.material, 'joist')
-            clear_start = self.trimmer_W_x_center + self.params.trimmers.base / 2
-            clear_end = ROOM_LENGTH - self.params.west_joists.padding
-            west_positions = self._resolve_joist_positions(self.params.west_joists.quantity, 
-                                                           clear_start,
-                                                           clear_end,
-                                                           joist_spec_west.base,
-                                                           "west"
-                                                           )
-            for i, x in enumerate(west_positions):
-                placements['west'].append(BeamPlacement(spec=joist_spec_west.copy(name=f'W{i}'), x_center=x))
-
         # Trimmers
-        trimmer_spec = BeamSpec('trimmer', self.params.trimmers.base, self.params.trimmers.height, self.params.trimmers.material, 'trimmer')
-        placements['trimmers'].append(BeamPlacement(spec=trimmer_spec.copy(name='trimmer_E'), x_center=self.trimmer_E_x_center))
-        placements['trimmers'].append(BeamPlacement(spec=trimmer_spec.copy(name='trimmer_W'), x_center=self.trimmer_W_x_center))
+        trimmer_spec = BeamSpec('trimmer', self.params.trimmers.base, 
+                               self.params.trimmers.height, 
+                               self.params.trimmers.material, 'trimmer')
+        
+        placements['trimmers'].append(
+            BeamPlacement(spec=trimmer_spec.copy(name='trimmer_E'), x_center=self.trimmer_E_x_center)
+        )
+        placements['trimmers'].append(
+            BeamPlacement(spec=trimmer_spec.copy(name='trimmer_W'), x_center=self.trimmer_W_x_center)
+        )
+        
+        # FIXED: Tail joists between trimmer inner faces, ending at header position
+        if self.params.tail_joists.quantity > 0:
+            tail_spec = BeamSpec('tail', self.params.tail_joists.base, 
+                               self.params.tail_joists.height, 
+                               self.params.tail_joists.material, 'tail')
+            
+            clear_start = self.opening_x_start
+            clear_end = self.opening_x_end
+            
+            tail_positions = self._resolve_joist_positions(
+                self.params.tail_joists.quantity, clear_start, clear_end, 
+                tail_spec.base
+            )
+            
+            for i, x in enumerate(tail_positions):
+                placements['tail'].append(
+                    BeamPlacement(spec=tail_spec.copy(name=f'T{i}'), x_center=x, 
+                                z_end=self.tail_z_end)
+                )
+        
+        # West joists: from west trimmer's west face to padding
+        if self.params.west_joists.quantity > 0:
+            joist_spec_west = BeamSpec('joist', self.params.west_joists.base, 
+                                      self.params.west_joists.height, 
+                                      self.params.west_joists.material, 'joist')
+            
+            clear_start = self.trimmer_W_x_center + self.params.trimmers.base / 2
+            clear_end = ROOM_WIDTH - self.params.west_joists.padding
+            
+            west_positions = self._resolve_joist_positions(
+                self.params.west_joists.quantity, clear_start, clear_end, 
+                joist_spec_west.base
+            )
+            
+            for i, x in enumerate(west_positions):
+                placements['west'].append(
+                    BeamPlacement(spec=joist_spec_west.copy(name=f'W{i}'), x_center=x)
+                )
         
         return placements
 
 
 class LayoutManager:
-    def __init__(self, room_length: float):
-        self.room_length = room_length
+    def __init__(self, room_width: float):
+        self.room_width = room_width
         self.beams: List[BeamPlacement] = []
         self._is_sorted = False
 
@@ -233,7 +268,7 @@ class LayoutManager:
         for i, p in enumerate(self.beams):
             # Calculate tributary boundaries
             left_boundary = self.beams[i-1].x_center if i > 0 else 0
-            right_boundary = self.beams[i+1].x_center if i < len(self.beams) - 1 else self.room_length
+            right_boundary = self.beams[i+1].x_center if i < len(self.beams) - 1 else self.room_width
             
             trib_left = (p.x_center - left_boundary) / 2
             trib_right = (right_boundary - p.x_center) / 2
@@ -264,6 +299,7 @@ def auto_add_walls(frame, layout, wall_thickness, material):
     
     eastmost_beam = layout.beams[0]
     westmost_beam = layout.beams[-1]
+    
     def node(floor, beam, end):
         return f"{'floor ' if floor else ''}{beam.spec.name}{end}"
     
@@ -321,6 +357,7 @@ def auto_add_walls(frame, layout, wall_thickness, material):
 
 
 def set_wall_opacity(plotter, opacity=0.5):
+    """Set opacity for wall quads to see through them"""
     for actor in plotter.renderer.actors.values():
         if (hasattr(actor, 'mapper') and
             hasattr(actor.mapper, 'dataset') and
@@ -329,10 +366,17 @@ def set_wall_opacity(plotter, opacity=0.5):
 
 
 def generate_and_analyze_floor(params: FloorPlanHyperparameters) -> tuple:
+    """
+    Main function to generate floor model and run FEA analysis.
+    Returns (frame, results_dict).
+    """
     resolver = GeometryResolver(params)
     placement_groups = resolver.resolve_all_placements()
+    
+    # Initialize FE model
     frame = FEModel3D()
     
+    # Add all materials
     for mat_name, props in MATERIALS.items():
         frame.add_material(
             mat_name, 
@@ -343,7 +387,7 @@ def generate_and_analyze_floor(params: FloorPlanHyperparameters) -> tuple:
         )
     
     # Create layout and add all beams
-    layout = LayoutManager(room_length=ROOM_LENGTH)
+    layout = LayoutManager(room_width=ROOM_WIDTH)
     for group_placements in placement_groups.values():
         layout.add_beams(group_placements)
     
@@ -423,13 +467,14 @@ def generate_and_analyze_floor(params: FloorPlanHyperparameters) -> tuple:
 
 
 if __name__ == '__main__':
+    # Configuration matching first script
     default_plan = FloorPlanHyperparameters(
         east_joists=BeamGroupSpec(base=60, height=120, material='wood', quantity=2, padding=0),
-        west_joists=BeamGroupSpec(base=60, height=120, material='wood', quantity=2, padding=0),
-        tail_joists=BeamGroupSpec(base=60, height=120, material='wood', quantity=2, padding=0),
+        west_joists=BeamGroupSpec(base=60, height=120, material='wood', quantity=1, padding=0),
+        tail_joists=BeamGroupSpec(base=60, height=120, material='wood', quantity=2),
         trimmers=BeamGroupSpec(base=80, height=160, material='wood', quantity=2),
         header=BeamGroupSpec(base=120, height=120, material='wood', quantity=1),
-        opening_x_start=820
+        opening_x_start=820  # East trimmer inner face position
     )
     
     frame, results = generate_and_analyze_floor(default_plan)

@@ -120,11 +120,11 @@ class LayoutManager:
             material = frame.materials[p.spec.material]
             dead_load = -section.A * material.rho
             frame.add_member_dist_load(p.spec.name, 'FY', dead_load, dead_load)
-
+    
     def apply_live_loads(self, frame: FEModel3D, live_load_mpa: float, opening_z: float):
         if not self._is_sorted:
-            raise RuntimeError("LayoutManager must be finalized before applying loads.")
-            
+            raise RuntimeError("LayoutManager must be sorted before applying loads.")
+        
         for i, beam_placement in enumerate(self.beams):
             pos_left = self.beams[i-1].x_center if i > 0 else 0
             pos_right = self.beams[i+1].x_center if i < len(self.beams)-1 else self.room_width
@@ -152,6 +152,81 @@ class LayoutManager:
                 else:
                     frame.add_member_dist_load(beam_placement.spec.name, 'FY', load_left + load_right, load_left + load_right)
 
+def auto_add_walls(frame, layout, wall_thickness, material):
+    layout.sort_beams()
+    
+    eastmost_beam = layout.beams[0]  # Beam closest to x=0
+    westmost_beam = layout.beams[-1]  # Beam furthest from x=0
+    
+    def node(floor, beam, end):
+        return f"{'floor ' if floor else ''}{beam.spec.name}{end}"
+    
+    frame.add_quad(
+        'west wall',
+        node(True, westmost_beam, 'S'),
+        node(True, westmost_beam, 'N'),
+        node(False, westmost_beam, 'N'),
+        node(False, westmost_beam, 'S'),
+        wall_thickness,
+        material
+    )
+    frame.add_quad(
+        'east wall',
+        node(True, eastmost_beam, 'N'),
+        node(True, eastmost_beam, 'S'),
+        node(False, eastmost_beam, 'S'),
+        node(False, eastmost_beam, 'N'),
+        wall_thickness,
+        material
+    )
+    
+    prev_beam = None
+    for i, beam in enumerate(layout.beams):
+        if prev_beam is None:
+            prev_beam = beam
+            continue
+        frame.add_quad(
+            f'south wall {prev_beam.spec.name}-{beam.spec.name}',
+            node(True, prev_beam, 'S'),
+            node(True, beam, 'S'),
+            node(False, beam, 'S'),
+            node(False, prev_beam, 'S'),
+            wall_thickness,
+            material
+        )
+        prev_beam = beam
+    
+    north_reaching_beams = [b for b in layout.beams if b.spec.beam_type != 'tail']
+    prev_beam = None
+    for beam in north_reaching_beams:
+        if prev_beam is None:
+            prev_beam = beam
+            continue
+        frame.add_quad(
+            f'north wall {prev_beam.spec.name}-{beam.spec.name}',
+            node(True, prev_beam, 'N'),
+            node(True, beam, 'N'),
+            node(False, beam, 'N'),
+            node(False, prev_beam, 'N'),
+            wall_thickness,
+            material
+        )
+        prev_beam = beam
+
+def apply_header_dead_load(frame: FEModel3D, header_name: str, header_spec: BeamSpec):
+    section = frame.sections[header_spec.section_name]
+    material = frame.materials[header_spec.material]
+    dead_load = -section.A * material.rho
+    frame.add_member_dist_load(header_name, 'FY', dead_load, dead_load)
+
+def set_wall_opacity(plotter, opacity=0.5):  
+    """Set opacity for wall quads to see through them"""
+    for actor in plotter.renderer.actors.values():
+        if (hasattr(actor, 'mapper') and
+            hasattr(actor.mapper, 'dataset') and
+            actor.mapper.dataset.n_faces_strict > 0):
+            actor.prop.opacity = opacity
+
 
 joist_spec = BeamSpec('joist', base=60, height=120, material='wood', beam_type='joist')
 trimmer_spec = BeamSpec('trimmer', base=80, height=160, material='wood', beam_type='trimmer')
@@ -164,11 +239,11 @@ beam_B = layout.add_beam_between(joist_spec.copy(name='B'), beam_A, trimmer_E)
 
 tail_length = beam_length - opening_width - wall_beam_contact_depth/2 - joist_spec.base
 tail_spec = joist_spec.copy(beam_type='tail')
-tail_C = layout.add_beam_at_offset(tail_spec.copy(name='tail E'), x_offset=1295, z_end=tail_length)
-tail_D = layout.add_beam_at_offset(tail_spec.copy(name='tail W'), x_offset=1645, z_end=tail_length)
+tail_C = layout.add_beam_at_offset(tail_spec.copy(name='tail C'), x_offset=1290, z_end=tail_length)
+tail_D = layout.add_beam_at_offset(tail_spec.copy(name='tail D'), x_offset=1650, z_end=tail_length)
 
 trimmer_W = layout.add_beam_at_offset(trimmer_spec.copy(name='trimmer W'), x_offset=2140)
-beam_E = layout.add_beam_at_offset(joist_spec.copy(name='C'), x_offset=ROOM_WIDTH - joist_spec.base)
+beam_E = layout.add_beam_at_offset(joist_spec.copy(name='E'), x_offset=ROOM_WIDTH - joist_spec.base)
 
 
 # Build the Frame Geometry
@@ -180,62 +255,32 @@ header_spec.create_section(frame)
 frame.add_node('header E', trimmer_E.x_center, floor2floor, tail_length)
 frame.add_node('header W', trimmer_W.x_center, floor2floor, tail_length)
 frame.add_member('header', 'header W', 'header E', header_spec.material, header_spec.section_name)
-
+auto_add_walls(frame, layout, wall_thickness=80, material='brick')
 for node_name, node in frame.nodes.items():
     if node_name.startswith('floor'):
         frame.def_support(node_name, True, True, True, True, True, True)
 
 
-## WALL SECTION
-
-def auto_add_walls(frame, layout, wall_thickness, material):
-    layout.sort_beams()
-
-    def node(floor, beam, end):
-        return f"{'floor ' if floor else ''}{beam.spec.name}{end}"
-
-    frame.add_quad(
-        'east wall',
-        node(True, layout.beams[-1], 'S'),
-        node(True, layout.beams[-1], 'N'),
-        node(False, layout.beams[-1], 'N'),
-        node(False, layout.beams[-1], 'S'),
-        wall_thickness,
-        material
-    )
-
-    frame.add_quad(
-        'west wall',
-        node(True, layout.beams[0], 'S'),
-        node(True, layout.beams[0], 'N'),
-        node(False, layout.beams[0], 'N'),
-        node(False, layout.beams[0], 'S'),
-        wall_thickness,
-        material
-    )
-
-auto_add_walls(frame, layout, wall_thickness=80, material='brick')
-
-### WALL SECTION ENDs
-
-
-# layout.apply_dead_loads(frame)
+layout.apply_dead_loads(frame)
+apply_header_dead_load(frame, 'header', header_spec)
 layout.apply_live_loads(frame, live_load_mpa=-0.003, opening_z=opening_z_start)
 frame.analyze(check_statics=True)
 
+for beam in frame.members:
+    print(f"\n--- {beam} Stats ---")
+    print(f"Max Moment (Mz): {frame.members[beam].max_moment('Mz', 'Combo 1'):.3f} N-mm")
+    print(f"Min Moment (Mz): {frame.members[beam].min_moment('Mz', 'Combo 1'):.3f} N-mm")
+    print(f"Max Shear (Fy): {frame.members[beam].max_shear('Fy', 'Combo 1'):.3f} N")
+    print(f"Min Shear (Fy): {frame.members[beam].min_shear('Fy', 'Combo 1'):.3f} N")
+    print(f"Max Deflection (dy): {frame.members[beam].max_deflection('dy', 'Combo 1'):.3f} mm")
+    print(f"Min Deflection (dy): {frame.members[beam].min_deflection('dy', 'Combo 1'):.3f} mm")
 
-def set_wall_opacity(plotter, opacity=0.5):  
-  for actor in plotter.renderer.actors.values():
-    if (hasattr(actor, 'mapper') and
-        hasattr(actor.mapper, 'dataset') and
-        actor.mapper.dataset.n_faces_strict > 0):
-      actor.prop.opacity = opacity
-
+# Render
 rndr = Renderer(frame)
 rndr.annotation_size = 5
-rndr.render_loads = True
+rndr.render_loads = False
 rndr.deformed_shape = True
-rndr.deformed_scale = 10000
-# opacity = .25
-# rndr.post_update_callbacks.append(lambda plotter: set_wall_opacity(plotter, opacity=opacity))
+rndr.deformed_scale = 1000
+opacity = 0.25
+rndr.post_update_callbacks.append(lambda plotter: set_wall_opacity(plotter, opacity=opacity))
 rndr.render_model()

@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import List, Dict
 from Pynite import FEModel3D
 import numpy as np
+from Pynite.Rendering import Renderer
 
 # Room and opening constants (units: mm, N, MPa)
 ROOM_WIDTH = 3000
@@ -20,7 +21,8 @@ beam_length = ROOM_LENGTH + wall_beam_contact_depth
 MATERIALS = {
     'wood': {'E': 11000, 'nu': 0.3, 'rho': 4.51e-6},
     'aluminum': {'E': 69000, 'nu': 0.33, 'rho': 2.7e-6},
-    'steel': {'E': 200000, 'nu': 0.3, 'rho': 7.85e-6}
+    'steel': {'E': 200000, 'nu': 0.3, 'rho': 7.85e-6},
+    'brick': {'E': 7000, 'nu': 0.2, 'rho': 5.75e-6}
 }
 
 @dataclass
@@ -274,6 +276,77 @@ class LayoutManager:
             frame.add_member_dist_load(p.spec.name, 'FY', load, load)
 
 
+def auto_add_walls(frame, layout, wall_thickness, material):
+    layout.sort_beams()
+    
+    eastmost_beam = layout.beams[0]  # Beam closest to x=0
+    westmost_beam = layout.beams[-1]  # Beam furthest from x=0
+    
+    def node(floor, beam, end):
+        return f"{'floor ' if floor else ''}{beam.spec.name}{end}"
+    
+    frame.add_quad(
+        'west wall',
+        node(True, westmost_beam, 'S'),
+        node(True, westmost_beam, 'N'),
+        node(False, westmost_beam, 'N'),
+        node(False, westmost_beam, 'S'),
+        wall_thickness,
+        material
+    )
+    frame.add_quad(
+        'east wall',
+        node(True, eastmost_beam, 'N'),
+        node(True, eastmost_beam, 'S'),
+        node(False, eastmost_beam, 'S'),
+        node(False, eastmost_beam, 'N'),
+        wall_thickness,
+        material
+    )
+    
+    prev_beam = None
+    for i, beam in enumerate(layout.beams):
+        if prev_beam is None:
+            prev_beam = beam
+            continue
+        frame.add_quad(
+            f'south wall {prev_beam.spec.name}-{beam.spec.name}',
+            node(True, prev_beam, 'S'),
+            node(True, beam, 'S'),
+            node(False, beam, 'S'),
+            node(False, prev_beam, 'S'),
+            wall_thickness,
+            material
+        )
+        prev_beam = beam
+    
+    north_reaching_beams = [b for b in layout.beams if b.spec.beam_type != 'tail']
+    prev_beam = None
+    for beam in north_reaching_beams:
+        if prev_beam is None:
+            prev_beam = beam
+            continue
+        frame.add_quad(
+            f'north wall {prev_beam.spec.name}-{beam.spec.name}',
+            node(True, prev_beam, 'N'),
+            node(True, beam, 'N'),
+            node(False, beam, 'N'),
+            node(False, prev_beam, 'N'),
+            wall_thickness,
+            material
+        )
+        prev_beam = beam
+
+
+def set_wall_opacity(plotter, opacity=0.5):  
+    """Set opacity for wall quads to see through them"""
+    for actor in plotter.renderer.actors.values():
+        if (hasattr(actor, 'mapper') and
+            hasattr(actor.mapper, 'dataset') and
+            actor.mapper.dataset.n_faces_strict > 0):
+            actor.prop.opacity = opacity
+
+
 def generate_and_analyze_floor(params: FloorPlanHyperparameters) -> Dict:
     """
     Main function to generate floor model and run FEA analysis.
@@ -328,6 +401,7 @@ def generate_and_analyze_floor(params: FloorPlanHyperparameters) -> Dict:
             tail_placement.spec.section_name
         )
     
+    auto_add_walls(frame, layout, wall_thickness=80, material='brick')
     # Define supports at all floor nodes
     for node_name in frame.nodes:
         if node_name.startswith('floor'):
@@ -348,10 +422,10 @@ def generate_and_analyze_floor(params: FloorPlanHyperparameters) -> Dict:
     frame.analyze(check_statics=True)
     
     # Extract results
-    max_header_deflection = abs(min(frame.members['header'].deflection['uy']))
+    max_header_deflection = abs(frame.members['header'].min_deflection('dy', 'Combo 1'))
     
     total_mass = sum(
-        m.L * frame.sections[m.section_name].A * frame.materials[m.material_name].rho 
+        m.L() * m.section.A * m.material.rho
         for m in frame.members.values()
     )
     
@@ -359,12 +433,12 @@ def generate_and_analyze_floor(params: FloorPlanHyperparameters) -> Dict:
     max_deflection_overall = 0
     worst_member = None
     for member_name, member in frame.members.items():
-        deflection = abs(min(member.deflection['uy']))
+        deflection = abs(member.min_deflection('dy', 'Combo 1'))
         if deflection > max_deflection_overall:
             max_deflection_overall = deflection
             worst_member = member_name
     
-    return {
+    return frame, {
         'max_header_deflection_mm': max_header_deflection,
         'max_deflection_overall_mm': max_deflection_overall,
         'worst_member': worst_member,
@@ -378,13 +452,13 @@ if __name__ == '__main__':
     # Test with default configuration
     default_plan = FloorPlanHyperparameters(
         east_joists=BeamGroupSpec(base=60, height=120, material='wood', quantity=2, padding=50),
-        west_joists=BeamGroupSpec(base=60, height=120, material='wood', quantity=1, padding=50),
+        west_joists=BeamGroupSpec(base=60, height=120, material='wood', quantity=2, padding=50),
         tail_joists=BeamGroupSpec(base=60, height=120, material='wood', quantity=3),
         trimmers=BeamGroupSpec(base=80, height=160, material='wood', quantity=2),
         header=BeamGroupSpec(base=120, height=120, material='wood', quantity=1)
     )
     
-    results = generate_and_analyze_floor(default_plan)
+    frame, results = generate_and_analyze_floor(default_plan)
     
     print(f"Analysis Complete:")
     print(f"  Max Header Deflection: {results['max_header_deflection_mm']:.3f} mm")
@@ -394,3 +468,13 @@ if __name__ == '__main__':
     print(f"  East trimmer center: {results['resolver'].trimmer_E_x_center:.1f} mm")
     print(f"  West trimmer center: {results['resolver'].trimmer_W_x_center:.1f} mm")
     print(f"  Clear opening width: {results['resolver'].opening_x_end - results['resolver'].opening_x_start:.1f} mm")
+
+    # Render
+    rndr = Renderer(frame)
+    rndr.annotation_size = 5
+    rndr.render_loads = False
+    rndr.deformed_shape = True
+    rndr.deformed_scale = 1000
+    opacity = 0.25
+    rndr.post_update_callbacks.append(lambda plotter: set_wall_opacity(plotter, opacity=opacity))
+    rndr.render_model()

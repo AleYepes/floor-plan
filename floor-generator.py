@@ -9,7 +9,6 @@ from tqdm.auto import tqdm
 
 
 # NAMING CONVENTION CLASS
-
 class Naming:
     @staticmethod
     def node(name: str, end: str, floor: bool = False) -> str:
@@ -38,19 +37,18 @@ class Naming:
 
 
 # CONSTANTS AND MATERIAL PROPERTIES
-
 @dataclass
 class DesignParameters:
-    room_length: float = 3000
-    room_width: float = 1870
-    room_height: float = 5465
-    plank_thickness: float = 25
-    opening_width: float = 630
-    opening_length: float = 1420
-    opening_x_start: float = 900
-    wall_beam_contact_depth: float = 40
-    live_load_mpa: float = -0.003
-    wall_thickness: float = 80
+    room_length: float
+    room_width: float
+    room_height: float
+    plank_thickness: float
+    opening_width: float
+    opening_length: float
+    opening_x_start: float
+    wall_beam_contact_depth: float
+    live_load_mpa: float
+    wall_thickness: float
 
     @property
     def floor_to_floor(self):
@@ -60,47 +58,23 @@ class DesignParameters:
     def beam_length(self):
         return self.room_width + self.wall_beam_contact_depth
 
-DEFAULT_PARAMS = DesignParameters()
+def load_design_parameters(path: str) -> DesignParameters:
+    params_df = pd.read_csv(path)
+    params = params_df.iloc[0].to_dict()
+    return DesignParameters(**params)
 
+def load_material_strengths(path: str) -> Dict:
+    materials_df = pd.read_csv(path)
+    materials_df.set_index('material', inplace=True)
+    return materials_df.to_dict(orient='index')
 
-# Room and opening constants (units: mm, N, MPa)
-# These are now properties of DesignParameters
-# ROOM_LENGTH = DEFAULT_PARAMS.room_length
-# ROOM_WIDTH = DEFAULT_PARAMS.room_width
-# ROOM_HEIGHT = DEFAULT_PARAMS.room_height
-# PLANK_THICKNESS = DEFAULT_PARAMS.plank_thickness
-# OPENING_WIDTH = DEFAULT_PARAMS.opening_width
-# OPENING_LENGTH = DEFAULT_PARAMS.opening_length
-# WALL_BEAM_CONTACT_DEPTH = DEFAULT_PARAMS.wall_beam_contact_depth
-
-# FLOOR_TO_FLOOR = ROOM_HEIGHT / 2 + PLANK_THICKNESS / 2
-# BEAM_LENGTH = ROOM_WIDTH + WALL_BEAM_CONTACT_DEPTH
-
-
-
-# Material strength properties (MPa for stresses)
-MATERIAL_STRENGTHS = {
-    'wood': {'f_mk': 24, 'f_vk': 4.0, 'E': 11000, 'nu': 0.3, 'rho': 4.51e-6},
-    'aluminum': {'f_mk': 160, 'f_vk': 90, 'E': 69000, 'nu': 0.33, 'rho': 2.7e-6},
-    'steel': {'f_mk': 235, 'f_vk': 140, 'E': 200000, 'nu': 0.3, 'rho': 7.85e-6},
-    'brick': {'f_mk': 10, 'f_vk': 1.0, 'E': 7000, 'nu': 0.2, 'rho': 5.75e-6}
-}
-
-# Beam catalog with all available profiles
-BEAM_CATALOG = pd.DataFrame([
-    {'id': 'W60x120', 'material': 'wood', 'base': 60, 'height': 120, 'shape': 'rectangular', 'cost_per_m3': 1648.95833, 'flange_width': None, 'flange_thickness': None, 'web_thickness': None},
-    {'id': 'W120x120', 'material': 'wood', 'base': 120, 'height': 120, 'shape': 'rectangular', 'cost_per_m3': 3297.91666, 'flange_width': None, 'flange_thickness': None, 'web_thickness': None},
-    {'id': 'W80x160', 'material': 'wood', 'base': 80, 'height': 160, 'shape': 'rectangular', 'cost_per_m3': 1358.39844, 'flange_width': None, 'flange_thickness': None, 'web_thickness': None},
-    {'id': 'W160x160', 'material': 'wood', 'base': 160, 'height': 160, 'shape': 'rectangular', 'cost_per_m3': 2716.79688, 'flange_width': None, 'flange_thickness': None, 'web_thickness': None},
-    
-    {'id': 'IPE100', 'material': 'steel', 'base': 55, 'height': 100, 'shape': 'I-beam', 'cost_per_m3': 7850, 'flange_width': 55, 'flange_thickness': 5.7, 'web_thickness': 4.1},
-    {'id': 'IPE120', 'material': 'steel', 'base': 64, 'height': 120, 'shape': 'I-beam', 'cost_per_m3': 7850, 'flange_width': 64, 'flange_thickness': 6.3, 'web_thickness': 4.4},
-    {'id': 'AL80x40', 'material': 'aluminum', 'base': 40, 'height': 80, 'shape': 'I-beam', 'cost_per_m3': 2500, 'flange_width': 40, 'flange_thickness': 4, 'web_thickness': 2.5},
-])
+# Units are mm, N, and MPa (N/mm²)
+DEFAULT_PARAMS = load_design_parameters('data/design_parameters.csv')
+MATERIAL_STRENGTHS = load_material_strengths('data/material_strengths.csv')
+BEAM_CATALOG = pd.read_csv('data/beam_catalog.csv')
 
 
 # CROSS-SECTION GEOMETRY CALCULATIONS
-
 @dataclass
 class CrossSectionGeometry:
     """Calculates geometric properties for different cross-section shapes"""
@@ -146,7 +120,6 @@ class CrossSectionGeometry:
 
 
 # BEAM SPECIFICATION CLASSES
-
 @dataclass
 class BeamSpec:
     """Beam specification using catalog ID"""
@@ -229,7 +202,6 @@ class BeamPlacement:
 
 
 # GEOMETRY RESOLVER
-
 class GeometryResolver:
     def __init__(
         self,
@@ -408,7 +380,6 @@ class GeometryResolver:
 
 
 # LAYOUT MANAGER
-
 class LayoutManager:
     def __init__(self, params: DesignParameters):
         self.params = params
@@ -424,7 +395,6 @@ class LayoutManager:
 
 
 # LOAD APPLICATOR
-
 class LoadApplicator:
     def __init__(self, layout: 'LayoutManager'):
         self.layout = layout
@@ -475,7 +445,6 @@ class LoadApplicator:
 
 
 # WALL GENERATION
-
 def auto_add_walls(frame, layout, wall_thickness, material):
     eastmost_beam, westmost_beam = layout.get_boundary_beams()
     
@@ -508,7 +477,6 @@ def auto_add_walls(frame, layout, wall_thickness, material):
 
 
 # TELEMETRY CLASSES
-
 @dataclass
 class Telemetry:
     beam_telemetries: Dict[str, Dict] = field(default_factory=dict)
@@ -655,7 +623,6 @@ class TelemetryCollector:
 
 
 # MAIN ANALYSIS FUNCTION
-
 def generate_and_analyze_floor(
     east_joists: BeamSpec,
     west_joists: BeamSpec,
@@ -721,7 +688,6 @@ def generate_and_analyze_floor(
 
 
 # OPTIMIZATION FRAMEWORK
-
 class FloorOptimizer:
     """Handles optimization and telemetry collection"""
     
@@ -947,6 +913,7 @@ class FloorOptimizer:
         return valid.loc[pareto_indices]
     
 if __name__ == '__main__':
+    # # Grid search
     # param_space = {
     #     'east_joist_catalog_id': ['W60x120', 'W80x160'],
     #     'east_quantity': [0, 1, 2, 3],
@@ -963,15 +930,11 @@ if __name__ == '__main__':
 
     # optimizer = FloorOptimizer()
     # results_df = optimizer.run_grid_search(param_space)
-
-    # # Save results
     # results_df.to_csv('data/floor_optimization_results.csv', index=False)
     # print(f"\nResults saved to 'data/floor_optimization_results.csv'")
 
-    # # Analyze results
     # valid_results = results_df[results_df['system_passes'] == True]
     # print(f"\nValid configurations: {len(valid_results)} / {len(results_df)}")
-
     # if len(valid_results) > 0:
     #     print("\n--- Top 3 configurations by cost ---")
     #     top_by_cost = valid_results.nsmallest(3, 'total_cost')
@@ -989,7 +952,7 @@ if __name__ == '__main__':
     #     print(pareto[['config_id', 'total_cost', 'max_deflection_mm',
     #                 'east_catalog_id', 'west_catalog_id', 'trimmer_catalog_id']])
 
-
+    # Single solution with rendering
     optimizer = FloorOptimizer()
     frame, result = optimizer.run_single_configuration(
         east_joists=BeamSpec(catalog_id='W60x120', beam_type='joist', quantity=2, padding=0),
@@ -1021,7 +984,7 @@ if __name__ == '__main__':
     else:
         print(f"Analysis failed: {result['error']}")
 
-    # # Render
+
     # def set_wall_opacity(plotter, opacity=0.5):
     #     for actor in plotter.renderer.actors.values():
     #         if (hasattr(actor, 'mapper') and

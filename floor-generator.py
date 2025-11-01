@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import List, Dict
 from Pynite import FEModel3D
 import numpy as np
+import pandas as pd
 from Pynite.Rendering import Renderer
 
 # Room and opening constants (units: mm, N, MPa)
@@ -18,11 +19,23 @@ beam_length = ROOM_wid + WALL_BEAM_CONTACT_DEPTH
 
 # Material properties database
 MATERIALS = {
-    'wood': {'E': 11000, 'nu': 0.3, 'rho': 4.51e-6},
-    'aluminum': {'E': 69000, 'nu': 0.33, 'rho': 2.7e-6},
-    'steel': {'E': 200000, 'nu': 0.3, 'rho': 7.85e-6},
-    'brick': {'E': 7000, 'nu': 0.2, 'rho': 5.75e-6}
+    'wood': {'f_mk': 24, 'f_vk': 4.0, 'E': 11000, 'nu': 0.3, 'rho': 4.51e-6},
+    'aluminum': {'f_mk': 160, 'f_vk': 90, 'E': 69000, 'nu': 0.33, 'rho': 2.7e-6},
+    'steel': {'f_mk': 235, 'f_vk': 140, 'E': 200000, 'nu': 0.3, 'rho': 7.85e-6},
+    'brick': {'f_mk': np.nan, 'f_vk': np.nan, 'E': 7000, 'nu': 0.2, 'rho': 5.75e-6}
 }
+
+# Beam catalog with all available profiles
+BEAM_CATALOG = pd.DataFrame([
+    {'id': 'W60x120', 'material': 'wood', 'base': 60, 'height': 120, 'shape': 'rectangular', 'cost_per_m3': 450, 'flange_width': None, 'flange_thickness': None, 'web_thickness': None},
+    {'id': 'W80x160', 'material': 'wood', 'base': 80, 'height': 160, 'shape': 'rectangular', 'cost_per_m3': 450, 'flange_width': None, 'flange_thickness': None, 'web_thickness': None},
+    {'id': 'W100x200', 'material': 'wood', 'base': 100, 'height': 200, 'shape': 'rectangular', 'cost_per_m3': 450, 'flange_width': None, 'flange_thickness': None, 'web_thickness': None},
+    
+    {'id': 'IPE100', 'material': 'steel', 'base': 55, 'height': 100, 'shape': 'I-beam', 'cost_per_m3': 7850, 'flange_width': 55, 'flange_thickness': 5.7, 'web_thickness': 4.1},
+    {'id': 'IPE120', 'material': 'steel', 'base': 64, 'height': 120, 'shape': 'I-beam', 'cost_per_m3': 7850, 'flange_width': 64, 'flange_thickness': 6.3, 'web_thickness': 4.4},
+    
+    {'id': 'AL80x40', 'material': 'aluminum', 'base': 40, 'height': 80, 'shape': 'I-beam', 'cost_per_m3': 2500, 'flange_width': 40, 'flange_thickness': 4, 'web_thickness': 2.5},
+])
 
 @dataclass
 class BeamSpec:
@@ -340,7 +353,6 @@ def generate_and_analyze_floor(params: FloorPlanHyperparameters) -> tuple:
             rho=props['rho']
         )
     
-    # Create layout and add all beams
     layout = LayoutManager(room_length=ROOM_LENGTH)
     for group_placements in placement_groups.values():
         layout.add_beams(group_placements)
@@ -375,8 +387,6 @@ def generate_and_analyze_floor(params: FloorPlanHyperparameters) -> tuple:
     header_material = frame.materials[header_spec.material]
     header_dead_load = -header_section.A * header_material.rho
     frame.add_member_dist_load('header', 'FY', header_dead_load, header_dead_load)
-    
-    # FIXED: Use negative live load and pass opening_z_start
     layout.apply_live_loads(frame, live_load_mpa=-0.003, opening_z_start=resolver.opening_z_start)
     
     frame.analyze(check_statics=True)

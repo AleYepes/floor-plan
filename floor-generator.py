@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Dict, Optional, Tuple
 from Pynite import FEModel3D
 from Pynite.Rendering import Renderer
@@ -22,6 +22,10 @@ class Naming:
     @staticmethod
     def wall(p1_name: str, p2_name: str, side: str) -> str:
         return f'{side} wall {p1_name}-{p2_name}'
+
+    @staticmethod
+    def side_wall(side: str) -> str:
+        return f'{side} wall'
 
     @staticmethod
     def header_node(end: str) -> str:
@@ -59,19 +63,37 @@ class DesignParameters:
         return self.room_width + self.wall_beam_contact_depth
 
 def load_design_parameters(path: str) -> DesignParameters:
-    params_df = pd.read_csv(path)
-    params = params_df.iloc[0].to_dict()
-    return DesignParameters(**params)
+    try:
+        params_df = pd.read_csv(path)
+        params = params_df.iloc[0].to_dict()
+        return DesignParameters(**params)
+    except FileNotFoundError:
+        raise SystemExit(f"Error: Design parameters file not found at '{path}'")
+    except Exception as e:
+        raise SystemExit(f"Error loading design parameters from '{path}': {e}")
 
 def load_material_strengths(path: str) -> Dict:
-    materials_df = pd.read_csv(path)
-    materials_df.set_index('material', inplace=True)
-    return materials_df.to_dict(orient='index')
+    try:
+        materials_df = pd.read_csv(path)
+        materials_df.set_index('material', inplace=True)
+        return materials_df.to_dict(orient='index')
+    except FileNotFoundError:
+        raise SystemExit(f"Error: Material strengths file not found at '{path}'")
+    except Exception as e:
+        raise SystemExit(f"Error loading material strengths from '{path}': {e}")
+
+def load_beam_catalog(path: str) -> pd.DataFrame:
+    try:
+        return pd.read_csv(path)
+    except FileNotFoundError:
+        raise SystemExit(f"Error: Beam catalog file not found at '{path}'")
+    except Exception as e:
+        raise SystemExit(f"Error loading beam catalog from '{path}': {e}")
 
 # Units are mm, N, and MPa (N/mm²)
 DEFAULT_PARAMS = load_design_parameters('data/design_parameters.csv')
 MATERIAL_STRENGTHS = load_material_strengths('data/material_strengths.csv')
-BEAM_CATALOG = pd.read_csv('data/beam_catalog.csv')
+BEAM_CATALOG = load_beam_catalog('data/beam_catalog.csv')
 
 
 # CROSS-SECTION GEOMETRY CALCULATIONS
@@ -172,10 +194,7 @@ class BeamSpec:
         return volume_m3 * self.cost_per_m3
     
     def copy(self, **kwargs):
-        new = BeamSpec(catalog_id=self.catalog_id, beam_type=self.beam_type, name=self.name)
-        for k, v in kwargs.items():
-            setattr(new, k, v)
-        return new
+        return replace(self, **kwargs)
 
 
 @dataclass
@@ -189,11 +208,11 @@ class BeamPlacement:
         z_end = self.z_end if self.z_end is not None else default_z_end
         name = self.spec.name
 
-        frame.add_node(Naming.node(name, 'N', floor=True), self.x_center, 0, z_end)
         frame.add_node(Naming.node(name, 'S', floor=True), self.x_center, 0, self.z_start)
         frame.add_node(Naming.node(name, 'S'), self.x_center, params.floor_to_floor, self.z_start)
         
         if self.spec.beam_type != 'tail':
+            frame.add_node(Naming.node(name, 'N', floor=True), self.x_center, 0, z_end)
             frame.add_node(Naming.node(name, 'N'), self.x_center, params.floor_to_floor, z_end)
             self.spec.create_section(frame)
             frame.add_member(Naming.member(name), Naming.node(name, 'N'), Naming.node(name, 'S'), self.spec.material, self.spec.section_name)
@@ -346,25 +365,21 @@ class GeometryResolver:
         all_placements.append(BeamPlacement(spec=trimmer_spec.copy(name='trimmer_E'), x_center=self.trimmer_E_x_center))
         all_placements.append(BeamPlacement(spec=trimmer_spec.copy(name='trimmer_W'), x_center=self.trimmer_W_x_center))
 
-        # Header
-        header_spec = BeamSpec(
-            self.header.catalog_id, 
-            'header', 
-            name='header',
-            quantity=self.header.quantity,
-            padding=self.header.padding
-        )
-        all_placements.append(BeamPlacement(spec=header_spec, x_center=None)) # Add header placeholder
         return all_placements
 
-    def add_complex_framing(self, frame: FEModel3D, layout: 'LayoutManager'):
-        # Add header member
+    def add_header_to_frame(self, frame: FEModel3D):
+        """Add header member to frame - call this separately"""
         header_spec = self.header
         header_spec.create_section(frame)
-        frame.add_node(Naming.header_node('E'), self.trimmer_E_x_center, self.params.floor_to_floor, self.header_z_pos)
-        frame.add_node(Naming.header_node('W'), self.trimmer_W_x_center, self.params.floor_to_floor, self.header_z_pos)
-        frame.add_member(Naming.header_member(), Naming.header_node('W'), Naming.header_node('E'), header_spec.material, header_spec.section_name)
+        frame.add_node(Naming.header_node('E'), self.trimmer_E_x_center, 
+                       self.params.floor_to_floor, self.header_z_pos)
+        frame.add_node(Naming.header_node('W'), self.trimmer_W_x_center, 
+                       self.params.floor_to_floor, self.header_z_pos)
+        frame.add_member(Naming.header_member(), Naming.header_node('W'), 
+                         Naming.header_node('E'), header_spec.material, 
+                         header_spec.section_name)
 
+    def connect_tails_to_header(self, frame: FEModel3D, layout: 'LayoutManager'):
         # Connect tail joists to header
         for beam_placement in layout.beams:
             if beam_placement.spec.beam_type == 'tail':
@@ -389,18 +404,18 @@ class LayoutManager:
         self.beams.extend(placements)
 
     def get_boundary_beams(self) -> Tuple[BeamPlacement, BeamPlacement]:
-        beams_with_position = [p for p in self.beams if p.x_center is not None]
-        beams_with_position.sort(key=lambda p: p.x_center)
+        beams_with_position = sorted(self.beams, key=lambda p: p.x_center)
         return beams_with_position[0], beams_with_position[-1]
 
 
 # LOAD APPLICATOR
 class LoadApplicator:
-    def __init__(self, layout: 'LayoutManager'):
-        self.layout = layout
+    def __init__(self, beams: List[BeamPlacement], params: DesignParameters):
+        self.beams = beams
+        self.params = params
 
     def apply_dead_loads(self, frame: FEModel3D):
-        for p in self.layout.beams:
+        for p in self.beams:
             if p.spec.beam_type == 'header':
                 continue
             section_geom = p.spec.get_geometry()
@@ -409,22 +424,20 @@ class LoadApplicator:
             frame.add_member_dist_load(p.spec.name, 'FY', dead_load, dead_load)
     
     def apply_live_loads(self, frame: FEModel3D):
-        sorted_beams = sorted(self.layout.beams, key=lambda p: p.x_center if p.x_center is not None else -1)
+        sorted_beams = sorted(self.beams, key=lambda p: p.x_center)
         if len(sorted_beams) < 2:
             return
 
         for i, p in enumerate(sorted_beams):
-            if p.spec.beam_type == 'header':
-                continue
             # Calculate tributary boundaries
-            left_boundary = sorted_beams[i-1].x_center if i > 0 and sorted_beams[i-1].x_center is not None else 0
-            right_boundary = sorted_beams[i+1].x_center if i < len(sorted_beams) - 1 and sorted_beams[i+1].x_center is not None else self.layout.params.room_length
+            left_boundary = sorted_beams[i-1].x_center if i > 0 else 0
+            right_boundary = sorted_beams[i+1].x_center if i < len(sorted_beams) - 1 else self.params.room_length
             
             trib_left = (p.x_center - left_boundary) / 2
             trib_right = (right_boundary - p.x_center) / 2
             
-            load_left = self.layout.params.live_load_mpa * trib_left
-            load_right = self.layout.params.live_load_mpa * trib_right
+            load_left = self.params.live_load_mpa * trib_left
+            load_right = self.params.live_load_mpa * trib_right
 
             if p.spec.beam_type in ['joist', 'tail']:
                 total_load = load_left + load_right
@@ -435,11 +448,11 @@ class LoadApplicator:
                 is_right_opening = i < len(sorted_beams)-1 and sorted_beams[i+1].spec.beam_type == 'tail'
                 
                 if is_left_opening:
-                    frame.add_member_dist_load(p.spec.name, 'FY', load_left, load_left, 0, self.layout.params.opening_width + self.layout.params.wall_beam_contact_depth/2)
+                    frame.add_member_dist_load(p.spec.name, 'FY', load_left, load_left, 0, self.params.opening_width + self.params.wall_beam_contact_depth/2)
                     frame.add_member_dist_load(p.spec.name, 'FY', load_right, load_right)
                 elif is_right_opening:
                     frame.add_member_dist_load(p.spec.name, 'FY', load_left, load_left)
-                    frame.add_member_dist_load(p.spec.name, 'FY', load_right, load_right, 0, self.layout.params.opening_width + self.layout.params.wall_beam_contact_depth/2)
+                    frame.add_member_dist_load(p.spec.name, 'FY', load_right, load_right, 0, self.params.opening_width + self.params.wall_beam_contact_depth/2)
                 else:
                     frame.add_member_dist_load(p.spec.name, 'FY', load_left + load_right, load_left + load_right)
 
@@ -448,17 +461,14 @@ class LoadApplicator:
 def auto_add_walls(frame, layout, wall_thickness, material):
     eastmost_beam, westmost_beam = layout.get_boundary_beams()
     
-    frame.add_quad('west wall', Naming.node(westmost_beam.spec.name, 'S', floor=True), Naming.node(westmost_beam.spec.name, 'N', floor=True), Naming.node(westmost_beam.spec.name, 'N'), Naming.node(westmost_beam.spec.name, 'S'), wall_thickness, material)
-    frame.add_quad('east wall', Naming.node(eastmost_beam.spec.name, 'N', floor=True), Naming.node(eastmost_beam.spec.name, 'S', floor=True), Naming.node(eastmost_beam.spec.name, 'S'), Naming.node(eastmost_beam.spec.name, 'N'), wall_thickness, material)
+    frame.add_quad(Naming.side_wall('west'), Naming.node(westmost_beam.spec.name, 'S', floor=True), Naming.node(westmost_beam.spec.name, 'N', floor=True), Naming.node(westmost_beam.spec.name, 'N'), Naming.node(westmost_beam.spec.name, 'S'), wall_thickness, material)
+    frame.add_quad(Naming.side_wall('east'), Naming.node(eastmost_beam.spec.name, 'N', floor=True), Naming.node(eastmost_beam.spec.name, 'S', floor=True), Naming.node(eastmost_beam.spec.name, 'S'), Naming.node(eastmost_beam.spec.name, 'N'), wall_thickness, material)
     
     # South wall should be continuous and connect all beams
-    sorted_beams = sorted(layout.beams, key=lambda p: p.x_center if p.x_center is not None else -1)
+    sorted_beams = sorted(layout.beams, key=lambda p: p.x_center)
     prev_beam = None
     for beam in sorted_beams:
         if prev_beam is None:
-            prev_beam = beam
-            continue
-        if beam.spec.beam_type == 'header' or prev_beam.spec.beam_type == 'header':
             prev_beam = beam
             continue
         frame.add_quad(Naming.wall(prev_beam.spec.name, beam.spec.name, 'south'), Naming.node(prev_beam.spec.name, 'S', floor=True), Naming.node(beam.spec.name, 'S', floor=True), Naming.node(beam.spec.name, 'S'), Naming.node(prev_beam.spec.name, 'S'), wall_thickness, material)
@@ -478,10 +488,54 @@ def auto_add_walls(frame, layout, wall_thickness, material):
 
 # TELEMETRY CLASSES
 @dataclass
+class BeamTelemetry:
+    name: str
+    material: str
+    catalog_id: str
+    length: float
+    max_moment_mz: float
+    min_moment_mz: float
+    max_shear_fy: float
+    min_shear_fy: float
+    max_deflection: float
+    min_deflection: float
+    volume: float
+    cost: float
+    stress_max: float
+    shear_stress_max: float
+    passes_bending: bool
+    passes_shear: bool
+
+@dataclass
+class GroupTelemetry:
+    group_name: str
+    count: int
+    max_deflection: float
+    mean_deflection: float
+    max_moment: float
+    mean_moment: float
+    max_shear: float
+    mean_shear: float
+    total_volume: float
+    total_cost: float
+    all_pass_bending: bool
+    all_pass_shear: bool
+    beam_details: List[BeamTelemetry]
+
+@dataclass
+class SystemTelemetry:
+    max_header_deflection_mm: float
+    max_deflection_overall_mm: float
+    worst_member: str
+    total_volume_m3: float
+    total_cost: float
+    system_passes: bool
+
+@dataclass
 class Telemetry:
-    beam_telemetries: Dict[str, Dict] = field(default_factory=dict)
-    group_telemetries: Dict[str, Dict] = field(default_factory=dict)
-    system_telemetry: Dict = field(default_factory=dict)
+    beam_telemetries: Dict[str, BeamTelemetry] = field(default_factory=dict)
+    group_telemetries: Dict[str, GroupTelemetry] = field(default_factory=dict)
+    system_telemetry: SystemTelemetry = None
 
 
 class TelemetryCollector:
@@ -509,7 +563,7 @@ class TelemetryCollector:
             tau = abs(shear) / web_area
         return tau
     
-    def collect_beam_telemetry(self, member_name: str, spec: BeamSpec) -> Dict:
+    def collect_beam_telemetry(self, member_name: str, spec: BeamSpec) -> BeamTelemetry:
         member = self.frame.members[member_name]
         
         # Get forces and deflections
@@ -537,55 +591,55 @@ class TelemetryCollector:
         volume = spec.get_volume(length)
         cost = spec.get_cost(length)
         
-        return {
-            'name': member_name,
-            'material': spec.material,
-            'catalog_id': spec.catalog_id,
-            'length': length,
-            'max_moment_mz': max_moment,
-            'min_moment_mz': min_moment,
-            'max_shear_fy': max_shear,
-            'min_shear_fy': min_shear,
-            'max_deflection': max_deflection,
-            'min_deflection': min_deflection,
-            'volume': volume,
-            'cost': cost,
-            'stress_max': stress_max,
-            'shear_stress_max': shear_stress_max,
-            'passes_bending': passes_bending,
-            'passes_shear': passes_shear
-        }
+        return BeamTelemetry(
+            name=member_name,
+            material=spec.material,
+            catalog_id=spec.catalog_id,
+            length=length,
+            max_moment_mz=max_moment,
+            min_moment_mz=min_moment,
+            max_shear_fy=max_shear,
+            min_shear_fy=min_shear,
+            max_deflection=max_deflection,
+            min_deflection=min_deflection,
+            volume=volume,
+            cost=cost,
+            stress_max=stress_max,
+            shear_stress_max=shear_stress_max,
+            passes_bending=passes_bending,
+            passes_shear=passes_shear
+        )
     
-    def collect_group_telemetry(self, group_name: str, member_names: List[str]) -> Dict:
+    def collect_group_telemetry(self, group_name: str, member_names: List[str]) -> GroupTelemetry:
         beam_telemetries = [self.collect_beam_telemetry(name, self.beam_specs[name]) for name in member_names]
         
         if not beam_telemetries:
-            return {
-                'group_name': group_name, 'count': 0, 'max_deflection': 0, 'mean_deflection': 0,
-                'max_moment': 0, 'mean_moment': 0, 'max_shear': 0, 'mean_shear': 0,
-                'total_volume': 0, 'total_cost': 0, 'all_pass_bending': True, 'all_pass_shear': True,
-                'beam_details': []
-            }
+            return GroupTelemetry(
+                group_name=group_name, count=0, max_deflection=0, mean_deflection=0,
+                max_moment=0, mean_moment=0, max_shear=0, mean_shear=0,
+                total_volume=0, total_cost=0, all_pass_bending=True, all_pass_shear=True,
+                beam_details=[]
+            )
         
-        deflections = [abs(b['min_deflection']) for b in beam_telemetries]
-        moments = [max(abs(b['max_moment_mz']), abs(b['min_moment_mz'])) for b in beam_telemetries]
-        shears = [max(abs(b['max_shear_fy']), abs(b['min_shear_fy'])) for b in beam_telemetries]
+        deflections = [abs(b.min_deflection) for b in beam_telemetries]
+        moments = [max(abs(b.max_moment_mz), abs(b.min_moment_mz)) for b in beam_telemetries]
+        shears = [max(abs(b.max_shear_fy), abs(b.min_shear_fy)) for b in beam_telemetries]
         
-        return {
-            'group_name': group_name,
-            'count': len(beam_telemetries),
-            'max_deflection': max(deflections),
-            'mean_deflection': np.mean(deflections),
-            'max_moment': max(moments),
-            'mean_moment': np.mean(moments),
-            'max_shear': max(shears),
-            'mean_shear': np.mean(shears),
-            'total_volume': sum(b['volume'] for b in beam_telemetries),
-            'total_cost': sum(b['cost'] for b in beam_telemetries),
-            'all_pass_bending': all(b['passes_bending'] for b in beam_telemetries),
-            'all_pass_shear': all(b['passes_shear'] for b in beam_telemetries),
-            'beam_details': beam_telemetries
-        }
+        return GroupTelemetry(
+            group_name=group_name,
+            count=len(beam_telemetries),
+            max_deflection=max(deflections),
+            mean_deflection=np.mean(deflections),
+            max_moment=max(moments),
+            mean_moment=np.mean(moments),
+            max_shear=max(shears),
+            mean_shear=np.mean(shears),
+            total_volume=sum(b.volume for b in beam_telemetries),
+            total_cost=sum(b.cost for b in beam_telemetries),
+            all_pass_bending=all(b.passes_bending for b in beam_telemetries),
+            all_pass_shear=all(b.passes_shear for b in beam_telemetries),
+            beam_details=beam_telemetries
+        )
     
     def collect_system_telemetry(self, beam_groups: Dict[str, List[str]]) -> Telemetry:
         """Collect telemetry for entire system"""
@@ -596,31 +650,30 @@ class TelemetryCollector:
                 continue
             group_telem = self.collect_group_telemetry(group_name, member_names)
             telemetry.group_telemetries[group_name] = group_telem
-            for beam_telem in group_telem['beam_details']:
-                telemetry.beam_telemetries[beam_telem['name']] = beam_telem
+            for beam_telem in group_telem.beam_details:
+                telemetry.beam_telemetries[beam_telem.name] = beam_telem
         
         # Overall metrics
         all_beam_stats = list(telemetry.beam_telemetries.values())
-        max_deflection_overall = max((abs(b['min_deflection']) for b in all_beam_stats), default=0)
-        worst_member = max(all_beam_stats, key=lambda b: abs(b['min_deflection']), default=None)
+        max_deflection_overall = max((abs(b.min_deflection) for b in all_beam_stats), default=0)
+        worst_member = max(all_beam_stats, key=lambda b: abs(b.min_deflection), default=None)
         
-        total_volume = sum(g['total_volume'] for g in telemetry.group_telemetries.values())
-        total_cost = sum(g['total_cost'] for g in telemetry.group_telemetries.values())
+        total_volume = sum(g.total_volume for g in telemetry.group_telemetries.values())
+        total_cost = sum(g.total_cost for g in telemetry.group_telemetries.values())
         
-        system_passes = all(g['all_pass_bending'] and g['all_pass_shear'] for g in telemetry.group_telemetries.values())
+        system_passes = all(g.all_pass_bending and g.all_pass_shear for g in telemetry.group_telemetries.values())
         
         header_deflection = abs(self.frame.members[Naming.header_member()].min_deflection('dy', 'Combo 1'))
         
-        telemetry.system_telemetry = {
-            'max_header_deflection_mm': header_deflection,
-            'max_deflection_overall_mm': max_deflection_overall,
-            'worst_member': worst_member['name'] if worst_member else '',
-            'total_volume_m3': total_volume / 1e9,
-            'total_cost': total_cost,
-            'system_passes': system_passes,
-        }
+        telemetry.system_telemetry = SystemTelemetry(
+            max_header_deflection_mm=header_deflection,
+            max_deflection_overall_mm=max_deflection_overall,
+            worst_member=worst_member.name if worst_member else '',
+            total_volume_m3=total_volume / 1e9,
+            total_cost=total_cost,
+            system_passes=system_passes,
+        )
         return telemetry
-
 
 # MAIN ANALYSIS FUNCTION
 def generate_and_analyze_floor(
@@ -657,10 +710,10 @@ def generate_and_analyze_floor(
     layout.add_beams(all_placements)
     
     for beam_placement in layout.beams:
-        if beam_placement.spec.beam_type != 'header':
-            beam_placement.add_to_frame(frame, DEFAULT_PARAMS, DEFAULT_PARAMS.beam_length)
+        beam_placement.add_to_frame(frame, DEFAULT_PARAMS, DEFAULT_PARAMS.beam_length)
 
-    resolver.add_complex_framing(frame, layout)
+    resolver.add_header_to_frame(frame)
+    resolver.connect_tails_to_header(frame, layout)
     
     # Add walls and supports
     auto_add_walls(frame, layout, wall_thickness=DEFAULT_PARAMS.wall_thickness, material='brick')
@@ -669,7 +722,7 @@ def generate_and_analyze_floor(
             frame.def_support(node_name, True, True, True, True, True, True)
     
     # Apply loads
-    load_applicator = LoadApplicator(layout)
+    load_applicator = LoadApplicator(layout.beams, layout.params)
     load_applicator.apply_dead_loads(frame)
     load_applicator.apply_live_loads(frame)
     
@@ -850,25 +903,25 @@ class FloorOptimizer:
                 'opening_x_start': DEFAULT_PARAMS.opening_x_start,
                 
                 # Overall metrics
-                'max_deflection_mm': telem.system_telemetry['max_deflection_overall_mm'],
-                'header_deflection_mm': telem.system_telemetry['max_header_deflection_mm'],
-                'worst_member': telem.system_telemetry['worst_member'],
-                'total_volume_m3': telem.system_telemetry['total_volume_m3'],
-                'total_cost': telem.system_telemetry['total_cost'],
-                'system_passes': telem.system_telemetry['system_passes'],
+                'max_deflection_mm': telem.system_telemetry.max_deflection_overall_mm,
+                'header_deflection_mm': telem.system_telemetry.max_header_deflection_mm,
+                'worst_member': telem.system_telemetry.worst_member,
+                'total_volume_m3': telem.system_telemetry.total_volume_m3,
+                'total_cost': telem.system_telemetry.total_cost,
+                'system_passes': telem.system_telemetry.system_passes,
                 
                 # Group-level metrics
-                **{f'{group}_max_deflection': stats['max_deflection'] 
+                **{f'{group}_max_deflection': stats.max_deflection 
                    for group, stats in telem.group_telemetries.items()},
-                **{f'{group}_mean_deflection': stats['mean_deflection'] 
+                **{f'{group}_mean_deflection': stats.mean_deflection 
                    for group, stats in telem.group_telemetries.items()},
-                **{f'{group}_max_moment': stats['max_moment'] 
+                **{f'{group}_max_moment': stats.max_moment 
                    for group, stats in telem.group_telemetries.items()},
-                **{f'{group}_passes_bending': stats['all_pass_bending'] 
+                **{f'{group}_passes_bending': stats.all_pass_bending 
                    for group, stats in telem.group_telemetries.items()},
-                **{f'{group}_passes_shear': stats['all_pass_shear'] 
+                **{f'{group}_passes_shear': stats.all_pass_shear 
                    for group, stats in telem.group_telemetries.items()},
-                **{f'{group}_total_cost': stats['total_cost'] 
+                **{f'{group}_total_cost': stats.total_cost 
                    for group, stats in telem.group_telemetries.items()},
                 
                 'success': True,
@@ -913,74 +966,35 @@ class FloorOptimizer:
         return valid.loc[pareto_indices]
     
 if __name__ == '__main__':
-    # # Grid search
-    # param_space = {
-    #     'east_joist_catalog_id': ['W60x120', 'W80x160'],
-    #     'east_quantity': [0, 1, 2, 3],
-    #     'west_joist_catalog_id': ['W60x120', 'W80x160'],
-    #     'west_quantity': [0, 1, 2, 3],
-    #     'tail_joist_catalog_id': ['W60x120', 'W80x160'],
-    #     'tail_quantity': [0, 1, 2, 3],
-    #     'trimmer_catalog_id': ['W60x120', 'W80x160', 'W120x120', 'W160x160'],
-    #     'header_catalog_id': ['W60x120', 'W80x160', 'W120x120', 'W160x160'],
-    #     'east_padding': list(range(0, 100, 20)),
-    #     'west_padding': list(range(0, 100, 20)),
-    #     'tail_padding': list(range(0, 100, 20)),
-    # }
-
-    # optimizer = FloorOptimizer()
-    # results_df = optimizer.run_grid_search(param_space)
-    # results_df.to_csv('data/floor_optimization_results.csv', index=False)
-    # print(f"\nResults saved to 'data/floor_optimization_results.csv'")
-
-    # valid_results = results_df[results_df['system_passes'] == True]
-    # print(f"\nValid configurations: {len(valid_results)} / {len(results_df)}")
-    # if len(valid_results) > 0:
-    #     print("\n--- Top 3 configurations by cost ---")
-    #     top_by_cost = valid_results.nsmallest(3, 'total_cost')
-    #     print(top_by_cost[['config_id', 'total_cost', 'max_deflection_mm', 
-    #                     'east_catalog_id', 'west_catalog_id', 'trimmer_catalog_id']])
-        
-    #     print("\n--- Top 3 configurations by deflection ---")
-    #     top_by_deflection = valid_results.nsmallest(3, 'max_deflection_mm')
-    #     print(top_by_deflection[['config_id', 'total_cost', 'max_deflection_mm',
-    #                             'east_catalog_id', 'west_catalog_id', 'trimmer_catalog_id']])
-        
-    #     print("\n--- Pareto-optimal solutions ---")
-    #     pareto = optimizer.get_pareto_front(results_df)
-    #     print(f"Found {len(pareto)} Pareto-optimal configurations")
-    #     print(pareto[['config_id', 'total_cost', 'max_deflection_mm',
-    #                 'east_catalog_id', 'west_catalog_id', 'trimmer_catalog_id']])
-
     # Single solution with rendering
     optimizer = FloorOptimizer()
     frame, result = optimizer.run_single_configuration(
-        east_joists=BeamSpec(catalog_id='W60x120', beam_type='joist', quantity=2, padding=0),
-        west_joists=BeamSpec(catalog_id='W60x120', beam_type='joist', quantity=2, padding=0),
-        tail_joists=BeamSpec(catalog_id='W60x120', beam_type='tail', quantity=2, padding=0),
+        east_joists=BeamSpec(catalog_id='W60x120', beam_type='joist', quantity=1, padding=0),
+        west_joists=BeamSpec(catalog_id='W60x120', beam_type='joist', quantity=1, padding=0),
+        tail_joists=BeamSpec(catalog_id='W60x120', beam_type='tail', quantity=1, padding=0),
         trimmers=BeamSpec(catalog_id='W80x160', beam_type='trimmer', quantity=2),
-        header=BeamSpec(catalog_id='W60x120', beam_type='header', quantity=1),
+        header=BeamSpec(catalog_id='W120x120', beam_type='header', quantity=1),
         config_id=0
     )
 
     if result['success']:
         telem = result['telemetry']
-        print(f"\nSystem passes all checks: {telem.system_telemetry['system_passes']}")
-        print(f"Total cost: ${telem.system_telemetry['total_cost']:.2f}")
-        print(f"Total volume: {telem.system_telemetry['total_volume_m3']:.4f} m³")
-        print(f"Max deflection: {telem.system_telemetry['max_deflection_overall_mm']:.3f} mm")
-        print(f"Header deflection: {telem.system_telemetry['max_header_deflection_mm']:.3f} mm")
-        print(f"Worst member: {telem.system_telemetry['worst_member']}")
+        print(f"\nSystem passes all checks: {telem.system_telemetry.system_passes}")
+        print(f"Total cost: ${telem.system_telemetry.total_cost:.2f}")
+        print(f"Total volume: {telem.system_telemetry.total_volume_m3:.4f} m³")
+        print(f"Max deflection: {telem.system_telemetry.max_deflection_overall_mm:.3f} mm")
+        print(f"Header deflection: {telem.system_telemetry.max_header_deflection_mm:.3f} mm")
+        print(f"Worst member: {telem.system_telemetry.worst_member}")
         
         print("\nGroup Statistics:")
         for group_name, stats in telem.group_telemetries.items():
             print(f"\n  {group_name}:")
-            print(f"    Count: {stats['count']}")
-            print(f"    Max deflection: {stats['max_deflection']:.3f} mm")
-            print(f"    Mean deflection: {stats['mean_deflection']:.3f} mm")
-            print(f"    Cost: ${stats['total_cost']:.2f}")
-            print(f"    Passes bending: {stats['all_pass_bending']}")
-            print(f"    Passes shear: {stats['all_pass_shear']}")
+            print(f"    Count: {stats.count}")
+            print(f"    Max deflection: {stats.max_deflection:.3f} mm")
+            print(f"    Mean deflection: {stats.mean_deflection:.3f} mm")
+            print(f"    Cost: ${stats.total_cost:.2f}")
+            print(f"    Passes bending: {stats.all_pass_bending}")
+            print(f"    Passes shear: {stats.all_pass_shear}")
     else:
         print(f"Analysis failed: {result['error']}")
 

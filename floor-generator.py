@@ -416,8 +416,6 @@ class LoadApplicator:
 
     def apply_dead_loads(self, frame: FEModel3D):
         for p in self.beams:
-            if p.spec.beam_type == 'header':
-                continue
             section_geom = p.spec.get_geometry()
             material = MATERIAL_STRENGTHS[p.spec.material]
             dead_load = -section_geom.A * material['rho']
@@ -705,6 +703,11 @@ def generate_and_analyze_floor(
             rho=props['rho']
         )
     
+    # Build beam spec map for telemetry
+    beam_spec_map = {}
+    for beam_placement in all_placements:
+        beam_spec_map[beam_placement.spec.name] = beam_placement.spec
+    
     # Create layout and add all beams
     layout = LayoutManager(params=DEFAULT_PARAMS)
     layout.add_beams(all_placements)
@@ -714,6 +717,9 @@ def generate_and_analyze_floor(
 
     resolver.add_header_to_frame(frame)
     resolver.connect_tails_to_header(frame, layout)
+
+    # Add header to beam_spec_map for telemetry
+    beam_spec_map['header'] = resolver.header
     
     # Add walls and supports
     auto_add_walls(frame, layout, wall_thickness=DEFAULT_PARAMS.wall_thickness, material='brick')
@@ -722,6 +728,11 @@ def generate_and_analyze_floor(
             frame.def_support(node_name, True, True, True, True, True, True)
     
     # Apply loads
+    header_geom = resolver.header.get_geometry()
+    header_material = MATERIAL_STRENGTHS[resolver.header.material]
+    header_dead_load = -header_geom.A * header_material['rho']
+    frame.add_member_dist_load(Naming.header_member(), 'FY', header_dead_load, header_dead_load)
+
     load_applicator = LoadApplicator(layout.beams, layout.params)
     load_applicator.apply_dead_loads(frame)
     load_applicator.apply_live_loads(frame)
@@ -731,11 +742,6 @@ def generate_and_analyze_floor(
         frame.analyze(check_statics=True)
     except Exception as e:
         raise RuntimeError(f"Analysis failed: {e}")
-    
-    # Build beam spec map for telemetry
-    beam_spec_map = {}
-    for beam_placement in all_placements:
-        beam_spec_map[beam_placement.spec.name] = beam_placement.spec
     
     return frame, resolver, beam_spec_map
 
@@ -755,8 +761,9 @@ class FloorOptimizer:
         trimmers: BeamSpec,
         header: BeamSpec,
         config_id: int = None
-    ) -> Dict:
+    ) -> Tuple[Optional[FEModel3D], Dict]:
         """Run analysis for a single configuration and collect telemetry"""
+        frame = None
         try:
             frame, resolver, beam_spec_map = generate_and_analyze_floor(
                 east_joists=east_joists,
@@ -793,7 +800,7 @@ class FloorOptimizer:
             }
             
         except Exception as e:
-            return frame, {
+            return None, {
                 'config_id': config_id,
                 'east_joists': east_joists,
                 'west_joists': west_joists,
@@ -821,7 +828,6 @@ class FloorOptimizer:
         """
         keys = list(param_space.keys())
         combinations = list(product(*[param_space[k] for k in keys]))
-        print(len(combinations))
         
         print(f"Running grid search over {len(combinations)} configurations...")
         
@@ -932,8 +938,7 @@ class FloorOptimizer:
         
         return pd.DataFrame(rows)
     
-    def get_pareto_front(self, df: pd.DataFrame, 
-                        objectives: List[str] = ['total_cost', 'max_deflection_mm']) -> pd.DataFrame:
+    def get_pareto_front(self, df: pd.DataFrame, objectives: List[str] = ['total_cost', 'max_deflection_mm']) -> pd.DataFrame:
         """Find Pareto-optimal solutions"""
         valid = df[(df['success'] == True) & (df['system_passes'] == True)].copy()
         
@@ -971,7 +976,7 @@ if __name__ == '__main__':
     frame, result = optimizer.run_single_configuration(
         east_joists=BeamSpec(catalog_id='W60x120', beam_type='joist', quantity=1, padding=0),
         west_joists=BeamSpec(catalog_id='W60x120', beam_type='joist', quantity=1, padding=0),
-        tail_joists=BeamSpec(catalog_id='W60x120', beam_type='tail', quantity=1, padding=0),
+        tail_joists=BeamSpec(catalog_id='W60x120', beam_type='tail', quantity=0, padding=0),
         trimmers=BeamSpec(catalog_id='W80x160', beam_type='trimmer', quantity=2),
         header=BeamSpec(catalog_id='W120x120', beam_type='header', quantity=1),
         config_id=0
@@ -999,18 +1004,18 @@ if __name__ == '__main__':
         print(f"Analysis failed: {result['error']}")
 
 
-    # def set_wall_opacity(plotter, opacity=0.5):
-    #     for actor in plotter.renderer.actors.values():
-    #         if (hasattr(actor, 'mapper') and
-    #             hasattr(actor.mapper, 'dataset') and
-    #             actor.mapper.dataset.n_faces_strict > 0):
-    #             actor.prop.opacity = opacity
+    def set_wall_opacity(plotter, opacity=0.5):
+        for actor in plotter.renderer.actors.values():
+            if (hasattr(actor, 'mapper') and
+                hasattr(actor.mapper, 'dataset') and
+                actor.mapper.dataset.n_faces_strict > 0):
+                actor.prop.opacity = opacity
 
-    # rndr = Renderer(frame)
-    # rndr.annotation_size = 5
-    # rndr.render_loads = False
-    # rndr.deformed_shape = True
-    # rndr.deformed_scale = 1000
-    # opacity = 0.25
-    # rndr.post_update_callbacks.append(lambda plotter: set_wall_opacity(plotter, opacity=opacity))
-    # rndr.render_model()
+    rndr = Renderer(frame)
+    rndr.annotation_size = 5
+    rndr.render_loads = False
+    rndr.deformed_shape = True
+    rndr.deformed_scale = 1000
+    opacity = 0.25
+    rndr.post_update_callbacks.append(lambda plotter: set_wall_opacity(plotter, opacity=opacity))
+    rndr.render_model()

@@ -25,45 +25,12 @@ class DesignParameters:
         return self.room_height / 2
 
     @property
-    def floor_to_ceiling(self):
-        return self.floor_y - self.plank_thickness / 2
-
-    @property
     def beam_length(self):
         return self.room_width + self.wall_beam_contact_depth
-
-def load_design_parameters(path: str) -> DesignParameters:
-    try:
-        params_df = pd.read_csv(path)
-        params = params_df.iloc[0].to_dict()
-        return DesignParameters(**params)
-    except FileNotFoundError:
-        raise SystemExit(f"Error: Design parameters file not found at '{path}'")
-    except Exception as e:
-        raise SystemExit(f"Error loading design parameters from '{path}': {e}")
-
-def load_material_strengths(path: str) -> Dict:
-    try:
-        materials_df = pd.read_csv(path)
-        materials_df.set_index('material', inplace=True)
-        return materials_df.to_dict(orient='index')
-    except FileNotFoundError:
-        raise SystemExit(f"Error: Material strengths file not found at '{path}'")
-    except Exception as e:
-        raise SystemExit(f"Error loading material strengths from '{path}': {e}")
-
-def load_material_catalog(path: str) -> pd.DataFrame:
-    try:
-        return pd.read_csv(path)
-    except FileNotFoundError:
-        raise SystemExit(f"Error: Beam catalog file not found at '{path}'")
-    except Exception as e:
-        raise SystemExit(f"Error loading material catalog from '{path}': {e}")
-
-# Units are mm, N, and MPa (N/mm²)
-DEFAULT_PARAMS = load_design_parameters('data/design_parameters.csv')
-MATERIAL_STRENGTHS = load_material_strengths('data/material_strengths.csv')
-BEAM_CATALOG = load_material_catalog('data/material_catalog.csv')
+    
+    @property
+    def opening_z(self):
+        return self.beam_length - self.opening_width - self.wall_beam_contact_depth/2
 
 
 @dataclass
@@ -109,6 +76,7 @@ class MemberSpec:
     padding: Optional[float] = None
     
     def __post_init__(self):
+        BEAM_CATALOG['id'] = (BEAM_CATALOG['material'] + BEAM_CATALOG['base'].astype(str) + 'x' + BEAM_CATALOG['height'].astype(str))
         self._catalog_data = BEAM_CATALOG[BEAM_CATALOG['id'] == self.catalog_id].iloc[0]
         self.material = self._catalog_data['material']
         self.base = self._catalog_data['base']
@@ -166,8 +134,7 @@ def calculate_nodes_and_members(
     tail_joists: MemberSpec,
     trimmers: MemberSpec,
     header: MemberSpec,
-    planks: MemberSpec,
-    params: DesignParameters) -> Tuple[List[NodeLocation], List[Member]]:
+    planks: MemberSpec) -> Tuple[List[NodeLocation], List[Member]]:
 
     def _calculate_evenly_spaced_positions(
         n: int, 
@@ -203,10 +170,10 @@ def calculate_nodes_and_members(
     assert header.quantity == 1, "Must have exactly 1 header"
     
     # Stairs opening params
-    opening_x_end = params.opening_x_start + params.opening_length
-    trimmer_E_x = params.opening_x_start - (trimmers.base / 2)
+    opening_x_end = INPUT_PARAMS.opening_x_start + INPUT_PARAMS.opening_length
+    trimmer_E_x = INPUT_PARAMS.opening_x_start - (trimmers.base / 2)
     trimmer_W_x = opening_x_end + (trimmers.base / 2)
-    header_z = (params.beam_length - params.opening_width - params.wall_beam_contact_depth/2 - header.base/2)
+    header_z = INPUT_PARAMS.opening_z - header.base/2
     
     # Beam centerline positions
     beam_positions = {}
@@ -217,22 +184,22 @@ def calculate_nodes_and_members(
         beam_positions['east'] = [(f'east{i}', x) for i, x in enumerate(x_positions)]
     
     if tail_joists.quantity > 0:
-        clear_start = params.opening_x_start + tail_joists.padding
+        clear_start = INPUT_PARAMS.opening_x_start + tail_joists.padding
         clear_end = opening_x_end - tail_joists.padding
         x_positions = _calculate_evenly_spaced_positions(tail_joists.quantity, clear_start, clear_end, tail_joists.base, 'centered')
         beam_positions['tail'] = [(f'tail{i}', x) for i, x in enumerate(x_positions)]
     
     if west_joists.quantity > 0:
         clear_start = trimmer_W_x + trimmers.base / 2
-        clear_end = params.room_length - west_joists.padding - west_joists.base
+        clear_end = INPUT_PARAMS.room_length - west_joists.padding
         x_positions = _calculate_evenly_spaced_positions(west_joists.quantity, clear_start, clear_end, west_joists.base, 'end_aligned')
         beam_positions['west'] = [(f'west{i}', x) for i, x in enumerate(x_positions)]
     
-    beam_positions['trimmer'] = [('trimmer_E', trimmer_E_x), ('trimmer_W', trimmer_W_x)]
+    beam_positions['trimmer'] = [('trimmerE', trimmer_E_x), ('trimmerW', trimmer_W_x)]
 
     # Plank centerline positions
-    clear_start = 0 + params.wall_beam_contact_depth
-    clear_end = params.room_width - params.wall_beam_contact_depth
+    clear_start = INPUT_PARAMS.wall_beam_contact_depth / 2
+    clear_end = INPUT_PARAMS.beam_length - INPUT_PARAMS.wall_beam_contact_depth / 2
     planks.quantity = int((clear_end - clear_start) // planks.base)
     z_positions = _calculate_evenly_spaced_positions(planks.quantity, clear_start-planks.base, clear_end+planks.base, planks.base, 'centered')
     plank_positions = [(f'p{i}', z) for i, z in enumerate(z_positions)]
@@ -242,23 +209,23 @@ def calculate_nodes_and_members(
     members = []
     for group_name, group_positions in beam_positions.items():
         for beam_name, x in group_positions:
-            nodes.append(NodeLocation(f'{beam_name}_S', x, params.floor_y, 0))
+            nodes.append(NodeLocation(f'{beam_name}_S', x, INPUT_PARAMS.floor_y, 0))
             if group_name == 'tail': # Tails connect to header (header_z), not to wall (beam_length)
-                nodes.append(NodeLocation(f'{beam_name}_header', x, params.floor_y, header_z))
+                nodes.append(NodeLocation(f'{beam_name}_header', x, INPUT_PARAMS.floor_y, header_z))
                 members.append(Member(name=beam_name, node_i=f'{beam_name}_header', node_j=f'{beam_name}_S', spec=east_joists))
             else:
-                nodes.append(NodeLocation(f'{beam_name}_N', x, params.floor_y, params.beam_length))
+                nodes.append(NodeLocation(f'{beam_name}_N', x, INPUT_PARAMS.floor_y, INPUT_PARAMS.beam_length))
                 members.append(Member(name=beam_name, node_i=f'{beam_name}_N', node_j=f'{beam_name}_S', spec=east_joists))
     
-    nodes.append(NodeLocation('header_E', trimmer_E_x, params.floor_y, header_z))
-    nodes.append(NodeLocation('header_W', trimmer_W_x, params.floor_y, header_z))
-    members.append(Member(name='header', node_i='header_W', node_j='header_E', spec=header))
+    nodes.append(NodeLocation('headerE', trimmer_E_x, INPUT_PARAMS.floor_y, header_z))
+    nodes.append(NodeLocation('headerW', trimmer_W_x, INPUT_PARAMS.floor_y, header_z))
+    members.append(Member(name='header', node_i='headerW', node_j='headerE', spec=header))
 
     # Corner nodes
-    walls = [('E', 0), ('W', params.room_length)]
+    walls = [('E', 0), ('W', INPUT_PARAMS.room_length)]
     for corner_name, x in walls:
-        nodes.append(NodeLocation(f'{corner_name}_S', x, params.floor_y, 0))
-        nodes.append(NodeLocation(f'{corner_name}_N', x, params.floor_y, params.beam_length))
+        nodes.append(NodeLocation(f'{corner_name}_S', x, INPUT_PARAMS.floor_y, 0))
+        nodes.append(NodeLocation(f'{corner_name}_N', x, INPUT_PARAMS.floor_y, INPUT_PARAMS.beam_length))
 
     # Plank nodes and member locations
     plank_series_dict = {}
@@ -267,7 +234,9 @@ def calculate_nodes_and_members(
         plank_nodes = []
         for group_positions in beam_positions.values():
             for beam_name, x in group_positions:
-                intersection_node = NodeLocation(f'{beam_name}-{plank_name}', x, params.floor_y, z)
+                if x > trimmer_E_x and x < trimmer_W_x and z > header_z:
+                    continue
+                intersection_node = NodeLocation(f'{beam_name}-{plank_name}', x, INPUT_PARAMS.floor_y, z)
                 plank_nodes.append(intersection_node)
                 nodes.append(intersection_node)
         plank_series_dict[plank_name] = plank_nodes
@@ -275,6 +244,8 @@ def calculate_nodes_and_members(
     for plank_name, plank_nodes in plank_series_dict.items():
         plank_nodes.sort(key=lambda node: node.x)
         for i, _ in enumerate(plank_nodes[:-1]):
+            if plank_nodes[i].x == trimmer_E_x and plank_nodes[i].z > header_z:
+                continue
             members.append(Member(name=f'{plank_name}_{i}', node_i=plank_nodes[i].name, node_j=plank_nodes[i+1].name, spec=planks))
     
     return nodes, members
@@ -343,6 +314,43 @@ def define_supports(frame, nodes, wall_thickness, material, walls=False):
                     frame.def_support(node.name, True, True, True, True, True, True)
 
 
+def apply_loads(frame, members):
+    # Dead loads
+    for member in members:
+        geom = member.spec.get_geometry()
+        material = MATERIAL_STRENGTHS[member.spec.material]
+        dead_load = -geom.A * material['rho']
+        frame.add_member_dist_load(member.name, 'FY', dead_load, dead_load)
+
+    # Live loads
+    plank_members = [m for m in members if m.name.startswith('p')]
+    plank_z_values = sorted(set(frame.nodes[m.node_i].Z for m in plank_members))
+    standard_spacing = plank_z_values[1] - plank_z_values[0]
+    
+    tail_planks = []
+    for m in plank_members:
+        if 'tail' in m.node_i or 'tail' in m.node_j:
+            tail_planks.append(m)
+    
+    min_z = min(plank_z_values)
+    max_z = max(plank_z_values)
+    max_tail_plank_z = max(frame.nodes[m.node_i].Z for m in tail_planks)
+    for member in plank_members:
+        member_z = frame.nodes[member.node_i].Z
+        
+        if member_z == min_z:
+            tributary_width = member.spec.base / 2 + standard_spacing / 2
+        elif member_z == max_z:
+            tributary_width = member.spec.base / 2 + standard_spacing / 2
+        elif member_z == max_tail_plank_z and member in tail_planks:
+            tributary_width = INPUT_PARAMS.opening_z - member_z + standard_spacing / 2
+        else:
+            tributary_width = standard_spacing
+        
+        live_load = -INPUT_PARAMS.live_load_mpa * tributary_width
+        frame.add_member_dist_load(member.name, 'FY', live_load, live_load)
+
+
 def create_model(
     east_joists: MemberSpec,
     west_joists: MemberSpec,
@@ -350,20 +358,12 @@ def create_model(
     trimmers: MemberSpec,
     header: MemberSpec,
     planks: MemberSpec,
-    params: DesignParameters = DEFAULT_PARAMS,
-    walls: bool = False) -> Tuple:
+    walls: bool) -> Tuple:
     
-    nodes, members = calculate_nodes_and_members(east_joists, west_joists, tail_joists, trimmers, header, planks, params)
-
+    nodes, members = calculate_nodes_and_members(east_joists, west_joists, tail_joists, trimmers, header, planks)
     frame = assemble_frame(nodes, members)
-    
-    define_supports(frame, nodes, params.wall_thickness, 'brick', walls=walls)
-    
-    for member in members:
-        geom = member.spec.get_geometry()
-        material = MATERIAL_STRENGTHS[member.spec.material]
-        dead_load = -geom.A * material['rho']
-        frame.add_member_dist_load(member.name, 'FY', dead_load, dead_load)
+    define_supports(frame, nodes, INPUT_PARAMS.wall_thickness, 'brick', walls=walls)
+    apply_loads(frame, members)
     
     return frame
 
@@ -386,14 +386,28 @@ def render(frame, deformed_scale=100, opacity=0.25):
 
 
 if __name__ == '__main__':
+
+    # Units are mm, N, and MPa (N/mm²)
+    params = pd.read_csv('data/design_parameters.csv').iloc[0].to_dict()
+    INPUT_PARAMS = DesignParameters(**params)
+    MATERIAL_STRENGTHS = pd.read_csv('data/material_strengths.csv').set_index('material').to_dict(orient='index')
+    BEAM_CATALOG = pd.read_csv('data/material_catalog.csv')
+
+    east_joists = MemberSpec('wood60x120', quantity=1, padding=0)
+    tail_joists = MemberSpec('wood60x120', quantity=1, padding=0)
+    west_joists = MemberSpec('wood60x120', quantity=1, padding=0)
+    trimmers = MemberSpec('wood80x160', quantity=2)
+    header = MemberSpec('wood60x120', quantity=1)
+    planks = MemberSpec('wood200x18')
+
     frame = create_model(
-        east_joists=MemberSpec('W60x120', quantity=2, padding=50),
-        west_joists=MemberSpec('W60x120', quantity=2, padding=50),
-        tail_joists=MemberSpec('W60x120', quantity=0, padding=0),
-        trimmers=MemberSpec('W80x160', quantity=2),
-        header=MemberSpec('W60x120', quantity=1),
-        planks=MemberSpec('W600x18'),
+        east_joists=east_joists,
+        west_joists=west_joists,
+        tail_joists=tail_joists,
+        trimmers=trimmers,
+        header=header,
+        planks=planks,
         walls=True
     )
     frame.analyze(check_statics=True)
-    render(frame)
+    render(frame, deformed_scale=100, opacity=0.25)

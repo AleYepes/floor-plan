@@ -27,11 +27,6 @@ class Naming:
     @staticmethod
     def side_wall(side: str) -> str:
         return f'{side} wall'
-    
-    @staticmethod
-    def corner_node(corner: str, floor: bool = False) -> str:
-        level = 'floor' if floor else 'ceiling'
-        return f'corner_{corner}_{level}'
 
     @staticmethod
     def header_node(end: str) -> str:
@@ -60,8 +55,12 @@ class DesignParameters:
     wall_thickness: float
 
     @property
-    def floor_to_floor(self):
-        return self.room_height / 2 + self.plank_thickness / 2
+    def floor_y(self):
+        return self.room_height / 2
+
+    @property
+    def floor_to_ceiling(self):
+        return self.floor_y - self.plank_thickness / 2
 
     @property
     def beam_length(self):
@@ -103,7 +102,6 @@ BEAM_CATALOG = load_material_catalog('data/material_catalog.csv')
 
 @dataclass
 class CrossSectionGeometry:
-    """Calculates geometric properties for different cross-section shapes"""
     A: float  # Area
     Iy: float  # Second moment about y-axis
     Iz: float  # Second moment about z-axis
@@ -197,186 +195,6 @@ class MemberLocation:
     spec: MemberSpec
 
 
-class NodeCalculator:
-    def __init__(self,
-        east_joists: MemberSpec,
-        west_joists: MemberSpec,
-        tail_joists: MemberSpec,
-        trimmers: MemberSpec,
-        header: MemberSpec,
-        planks: Optional[MemberSpec],
-        params: DesignParameters):
-
-        self.east_joists = east_joists
-        self.west_joists = west_joists
-        self.tail_joists = tail_joists
-        self.trimmers = trimmers
-        self.header = header
-        self.planks = planks
-        self.params = params
-        
-        assert self.trimmers.quantity == 2, "Must have exactly 2 trimmers"
-        assert self.header.quantity == 1, "Must have exactly 1 header"
-        
-        # Calculate key geometry
-        self.opening_x_start = params.opening_x_start
-        self.opening_x_end = self.opening_x_start + params.opening_length
-        
-        self.trimmer_E_x = self.opening_x_start - (self.trimmers.base / 2)
-        self.trimmer_W_x = self.opening_x_end + (self.trimmers.base / 2)
-        
-        self.header_z = (params.beam_length - params.opening_width - 
-                        params.wall_beam_contact_depth/2 - self.header.base/2)
-        
-        self.floor_y = 0
-        self.ceiling_y = params.floor_to_floor
-    
-    def _calculate_evenly_spaced_positions(self, 
-        n: int, 
-        clear_start: float, 
-        clear_end: float, 
-        member_base: float,
-        distribution: Literal['start_aligned', 'end_aligned', 'centered']) -> List[float]:
-
-        if n == 0:
-            return []
-        
-        if distribution == 'start_aligned':
-            # First centerline at clear_start + member_base/2
-            centerline_start = clear_start + member_base / 2
-            centerline_end = clear_end + member_base / 2
-            positions = np.linspace(centerline_start, centerline_end, n + 1).tolist()
-            return positions[:-1]  # Drop the last position
-        
-        elif distribution == 'end_aligned':
-            # Last centerline at clear_end - member_base/2
-            centerline_start = clear_start - member_base / 2
-            centerline_end = clear_end - member_base / 2
-            positions = np.linspace(centerline_end, centerline_start, n + 1).tolist()
-            return positions[:-1]  # Drop the last position
-        
-        elif distribution == 'centered':
-            # Equal spacing on both sides and between
-            centerline_start = clear_start + member_base / 2
-            centerline_end = clear_end - member_base / 2
-            positions = np.linspace(centerline_start, centerline_end, n + 2).tolist()
-            return positions[1:-1]  # Drop first and last
-        
-        else:
-            raise ValueError(f"Unknown distribution: {distribution}")
-    
-    def calculate_member_centerlines(self) -> Dict[str, List[Tuple[str, float]]]:
-        positions = {}
-        
-        # East joists
-        if self.east_joists.quantity > 0:
-            clear_start = self.east_joists.padding
-            clear_end = self.trimmer_E_x - self.trimmers.base / 2
-            x_positions = self._calculate_evenly_spaced_positions(
-                self.east_joists.quantity,
-                clear_start,
-                clear_end,
-                self.east_joists.base,
-                'start_aligned'
-            )
-            positions['east'] = [(f'E{i}', x) for i, x in enumerate(x_positions)]
-        
-        # Tail joists
-        if self.tail_joists.quantity > 0:
-            clear_start = self.opening_x_start + self.tail_joists.padding
-            clear_end = self.opening_x_end - self.tail_joists.padding
-            x_positions = self._calculate_evenly_spaced_positions(
-                self.tail_joists.quantity,
-                clear_start,
-                clear_end,
-                self.tail_joists.base,
-                'centered'
-            )
-            positions['tail'] = [(f'T{i}', x) for i, x in enumerate(x_positions)]
-        
-        # West joists
-        if self.west_joists.quantity > 0:
-            clear_start = self.trimmer_W_x + self.trimmers.base / 2
-            clear_end = self.params.room_length - self.west_joists.padding - self.west_joists.base
-            x_positions = self._calculate_evenly_spaced_positions(
-                self.west_joists.quantity,
-                clear_start,
-                clear_end,
-                self.west_joists.base,
-                'end_aligned'
-            )
-            positions['west'] = [(f'W{i}', x) for i, x in enumerate(x_positions)]
-
-        # Planks
-        if self.planks.quantity > 0:
-            clear_start = 0 + self.params.wall_beam_contact_depth
-            clear_end = self.params.room_length - self.params.wall_beam_contact_depth
-            z_positions = self._calculate_evenly_spaced_positions(
-                self.planks.quantity,
-                clear_start,
-                clear_end,
-                self.planks.base,
-                'centered'
-            )
-            positions['planks'] =  [(f'plank{i}', x) for i, x in enumerate(z_positions)]
-        
-        return positions
-    
-    def calculate_all_nodes(self) -> List[NodeLocation]:
-        nodes = []
-        beam_positions = self.calculate_member_centerlines()
-        plank_positions = beam_positions.pop('planks', None)
-        
-        # Add joist nodes
-        for group_name, group_positions in beam_positions.items():
-            if group_name != 'planks':
-                for name, x in group_positions:
-                    nodes.append(NodeLocation(f'{name}_S_floor', x, self.floor_y, 0))
-                    nodes.append(NodeLocation(f'{name}_N_floor', x, self.floor_y, self.params.beam_length))
-                    nodes.append(NodeLocation(f'{name}_S', x, self.ceiling_y, 0))
-                    if group_name != 'tail':
-                        nodes.append(NodeLocation(f'{name}_N', x, self.ceiling_y, self.params.beam_length))
-                    else:
-                        nodes.append(NodeLocation(f'{name}_header', x, self.ceiling_y, self.header_z))
-        
-        # Add trimmer nodes
-        for name, x in [('trimmer_E', self.trimmer_E_x), ('trimmer_W', self.trimmer_W_x)]:
-            nodes.append(NodeLocation(f'{name}_S_floor', x, self.floor_y, 0))
-            nodes.append(NodeLocation(f'{name}_N_floor', x, self.floor_y, self.params.beam_length))
-            nodes.append(NodeLocation(f'{name}_S', x, self.ceiling_y, 0))
-            nodes.append(NodeLocation(f'{name}_N', x, self.ceiling_y, self.params.beam_length))
-        
-        # Add header nodes
-        nodes.append(NodeLocation('header_E', self.trimmer_E_x, self.ceiling_y, self.header_z))
-        nodes.append(NodeLocation('header_W', self.trimmer_W_x, self.ceiling_y, self.header_z))
-        
-        # Add plank intersection nodes
-        for z in plank_positions:
-            x_intersections = []
-            for group_positions in beam_positions.values():
-                x_intersections.extend([(name, x) for name, x in group_positions])
-            x_intersections.extend([('trimmer_E', self.trimmer_E_x), ('trimmer_W', self.trimmer_W_x)])
-            x_intersections.sort(key=lambda t: t[1])
-            
-            for plank_name, z in plank_positions:
-                for member_name, x in x_intersections:
-                    node_name = f'{plank_name}_at_{member_name}'
-                    nodes.append(NodeLocation(node_name, x, self.ceiling_y, z))
-        
-        # Add corner nodes for walls
-        corners = [
-            ('SW', 0, 0),
-            ('SE', self.params.room_length, 0),
-            ('NW', 0, self.params.beam_length),
-            ('NE', self.params.room_length, self.params.beam_length)
-        ]
-        for corner_name, x, z in corners:
-            nodes.append(NodeLocation(f'corner_{corner_name}_floor', x, self.floor_y, z))
-            nodes.append(NodeLocation(f'corner_{corner_name}_ceiling', x, self.ceiling_y, z))
-        
-        return nodes
-
-
 def _calculate_evenly_spaced_positions(
     n: int, 
     clear_start: float, 
@@ -409,7 +227,7 @@ def _calculate_evenly_spaced_positions(
         raise ValueError(f"Unknown distribution: {distribution}")
     
 
-def calculate_geometry_and_members(
+def calculate_nodes_and_members(
     east_joists: MemberSpec,
     west_joists: MemberSpec,
     tail_joists: MemberSpec,
@@ -422,13 +240,10 @@ def calculate_geometry_and_members(
     assert header.quantity == 1, "Must have exactly 1 header"
     
     # Key geometry
-    opening_x_start = params.opening_x_start
-    opening_x_end = opening_x_start + params.opening_length
-    trimmer_E_x = opening_x_start - (trimmers.base / 2)
+    opening_x_end = params.opening_x_start + params.opening_length
+    trimmer_E_x = params.opening_x_start - (trimmers.base / 2)
     trimmer_W_x = opening_x_end + (trimmers.base / 2)
     header_z = (params.beam_length - params.opening_width - params.wall_beam_contact_depth/2 - header.base/2)
-    floor_y = 0
-    ceiling_y = params.floor_to_floor
     
     # Beam centerline positions
     beam_positions = {}
@@ -439,7 +254,7 @@ def calculate_geometry_and_members(
         beam_positions['east'] = [(f'east{i}', x) for i, x in enumerate(x_positions)]
     
     if tail_joists.quantity > 0:
-        clear_start = opening_x_start + tail_joists.padding
+        clear_start = params.opening_x_start + tail_joists.padding
         clear_end = opening_x_end - tail_joists.padding
         x_positions = _calculate_evenly_spaced_positions(tail_joists.quantity, clear_start, clear_end, tail_joists.base, 'centered')
         beam_positions['tail'] = [(f'tail{i}', x) for i, x in enumerate(x_positions)]
@@ -456,91 +271,110 @@ def calculate_geometry_and_members(
     clear_start = 0 + params.wall_beam_contact_depth
     clear_end = params.room_length - params.wall_beam_contact_depth
     z_positions = _calculate_evenly_spaced_positions(planks.quantity, clear_start, clear_end, planks.base, 'centered')
-    plank_positions = [(f'P{i}', z) for i, z in enumerate(z_positions)]
+    plank_positions = [(f'plank{i}', z) for i, z in enumerate(z_positions)]
     
     # Beam nodes and member locations
     nodes = []
+    members = []
     for group_name, group_positions in beam_positions.items():
-        for name, x in group_positions:
-            nodes.append(NodeLocation(f'{name}_S_floor', x, floor_y, 0))
-            nodes.append(NodeLocation(f'{name}_N_floor', x, floor_y, params.beam_length))
-            nodes.append(NodeLocation(f'{name}_S', x, ceiling_y, 0))
-            if group_name == 'tail':
-                nodes.append(NodeLocation(f'{name}_N', x, ceiling_y, header_z)) # Tails connect to header (header_z), not to wall (beam_length)
+        for beam_name, x in group_positions:
+            nodes.append(NodeLocation(f'{beam_name}_S', x, params.floor_y, 0))
+            if group_name == 'tail': # Tails connect to header (header_z), not to wall (beam_length)
+                nodes.append(NodeLocation(f'{beam_name}_header', x, params.floor_y, header_z))
+                members.append(MemberLocation(name=beam_name, node_i=f'{beam_name}_header', node_j=f'{beam_name}_S', spec=east_joists))
             else:
-                nodes.append(NodeLocation(f'{name}_N', x, ceiling_y, params.beam_length))
+                nodes.append(NodeLocation(f'{beam_name}_N', x, params.floor_y, params.beam_length))
+                members.append(MemberLocation(name=beam_name, node_i=f'{beam_name}_N', node_j=f'{beam_name}_S', spec=east_joists))
     
-    nodes.append(NodeLocation('header_E', trimmer_E_x, ceiling_y, header_z))
-    nodes.append(NodeLocation('header_W', trimmer_W_x, ceiling_y, header_z))
-    
-    members = [MemberLocation(name=name, node_i=f'{name}_N', node_j=f'{name}_S', spec=east_joists) for name, x in beam_positions]
-    members.append(MemberLocation(name='header', node_i='header_W', node_j='header_E', spec=header))
+    nodes.append(NodeLocation('E_header', trimmer_E_x, params.floor_y, header_z))
+    nodes.append(NodeLocation('W_header', trimmer_W_x, params.floor_y, header_z))
+    members.append(MemberLocation(name='header', node_i='W_header', node_j='E_header', spec=header))
 
     # Corner nodes
     walls = [('E', 0), ('W', params.room_length)]
     for corner_name, x in walls:
-        nodes.append(NodeLocation(f'S{corner_name}', x, ceiling_y, 0))
-        nodes.append(NodeLocation(f'N{corner_name}', x, ceiling_y, params.beam_length))
-        nodes.append(NodeLocation(f'S{corner_name}_floor', x, floor_y, 0))
-        nodes.append(NodeLocation(f'N{corner_name}_floor', x, floor_y, params.beam_length))
+        nodes.append(NodeLocation(f'{corner_name}_S', x, params.floor_y, 0))
+        nodes.append(NodeLocation(f'{corner_name}_N', x, params.floor_y, params.beam_length))
 
     # Plank nodes and member locations
-    plank_series = {}
+    plank_series_dict = {}
     beam_positions['walls'] = walls # So planks extend to walls
     for plank_name, z in plank_positions:
         plank_nodes = []
         for group_positions in beam_positions.values():
             for beam_name, x in group_positions:
-                intersection_node = NodeLocation(f'{plank_name}-{beam_name}', x, ceiling_y, z)
+                intersection_node = NodeLocation(f'{beam_name}-{plank_name}', x, params.floor_y, z)
                 plank_nodes.append(intersection_node)
                 nodes.append(intersection_node)
-        plank_series[plank_name] = plank_nodes
+        plank_series_dict[plank_name] = plank_nodes
     
-    for plank_name, plank_nodes in plank_series.items():
+    for plank_name, plank_nodes in plank_series_dict.items():
         plank_nodes.sort(lambda node: node.x)
-        for i, _ in enumerate(plank_nodes):
+        for i, _ in enumerate(plank_nodes[:-1]):
             members.append(MemberLocation(name=f'{plank_name}_{i}', node_i=plank_nodes[i], node_j=plank_nodes[i+1], spec=planks))
     
     return nodes, members
 
-
-class FrameAssembler:
-    def __init__(self, params: DesignParameters):
-        self.params = params
     
-    def assemble_frame(self, 
-        nodes: List[NodeLocation], 
-        members: List[MemberLocation]) -> Tuple[FEModel3D, Dict[str, MemberSpec]]:
-
-        frame = FEModel3D()
-        for mat_name, props in MATERIAL_STRENGTHS.items():
-            frame.add_material(
-                mat_name,
-                E=props['E'],
-                G=props['E'] / (2 * (1 + props['nu'])),
-                nu=props['nu'],
-                rho=props['rho']
-            )
-        
-        for node in nodes:
-            frame.add_node(node.name, node.x, node.y, node.z)
-        
-        member_spec_map = {}
-        for member in members:
-            member.spec.create_section(frame)
-            frame.add_member(
-                member.name,
-                member.node_i,
-                member.node_j,
-                member.spec.material,
-                member.spec.section_name
-            )
-            member_spec_map[member.name] = member.spec
-        
-        return frame, member_spec_map
+def assemble_frame(nodes: List[NodeLocation], members: List[MemberLocation]) -> Tuple[FEModel3D, Dict[str, MemberSpec]]:
+    frame = FEModel3D()
+    for mat_name, props in MATERIAL_STRENGTHS.items():
+        frame.add_material(
+            mat_name,
+            E=props['E'],
+            G=props['E'] / (2 * (1 + props['nu'])),
+            nu=props['nu'],
+            rho=props['rho']
+        )
+    
+    for node in nodes:
+        frame.add_node(node.name, node.x, node.y, node.z)
+    
+    for member in members:
+        member.spec.create_section(frame)
+        frame.add_member(
+            member.name,
+            member.node_i,
+            member.node_j,
+            member.spec.material,
+            member.spec.section_name
+        )
+    
+    return frame
 
 
-def generate_and_analyze_floor(
+def define_supports(frame, nodes, wall_thickness, material, walls=False):
+    supports = {}
+    supports['north'] = [n for n in nodes if n.name.endswith('_N')].sort(key=lambda n: n.x)
+    supports['south'] = [n for n in nodes if n.name.endswith('_S')].sort(key=lambda n: n.x)
+    supports['east'] = [n for n in nodes if n.name.startswith('E_')].sort(key=lambda n: n.z)
+    supports['west'] = [n for n in nodes if n.name.startswith('W_')].sort(key=lambda n: n.z)
+
+    if walls:
+        for support_side, support_nodes in supports.items():
+            for node in support_nodes:
+                frame.add_node(f'{node.name}_floor', node.x, 0, node.z)
+            
+            for i, _ in enumerate(support_nodes[:-1]):
+                frame.add_quad(
+                    f'{support_side}_wall{i}',
+                    support_nodes[i].name,
+                    support_nodes[i+1].name,
+                    f'{support_nodes[i].name}_floor',
+                    f'{support_nodes[i+1].name}_floor',
+                    wall_thickness, 
+                    material
+                )
+        for node_name in frame.nodes:
+            if node_name.endswith('_floor'):
+                frame.def_support(node_name, True, True, True, True, True, True)
+    else:
+        for support_side, support_nodes in supports.items():
+            if support_side in ['north', 'south']:
+                for node in support_nodes:
+                    frame.def_support(node_name, True, True, True, True, True, True)
+
+def create_model(
     east_joists: MemberSpec,
     west_joists: MemberSpec,
     tail_joists: MemberSpec,
@@ -549,33 +383,19 @@ def generate_and_analyze_floor(
     planks: MemberSpec,
     params: DesignParameters = DEFAULT_PARAMS) -> Tuple:
     
-    nodes, members = calculate_geometry_and_members(east_joists, west_joists, tail_joists, trimmers, header, planks, params)
+    nodes, members = calculate_nodes_and_members(east_joists, west_joists, tail_joists, trimmers, header, planks, params)
 
-    assembler = FrameAssembler(params)
-    frame, member_spec_map = assembler.assemble_frame(nodes, members)
+    frame = assemble_frame(nodes, members)
     
-    # Step 4: Add walls (TODO: refactor this too)
-    # auto_add_walls(frame, layout, params, params.wall_thickness, 'brick')
+    define_supports(frame, nodes, params.wall_thickness, 'brick', wall=True)
     
-    # Step 5: Add supports
-    for node_name in frame.nodes:
-        if 'floor' in node_name:
-            frame.def_support(node_name, True, True, True, True, True, True)
-    
-    # Step 6: Apply loads
     for member in members:
         geom = member.spec.get_geometry()
         material = MATERIAL_STRENGTHS[member.spec.material]
         dead_load = -geom.A * material['rho']
         frame.add_member_dist_load(member.name, 'FY', dead_load, dead_load)
     
-    # Step 7: Analyze
-    try:
-        frame.analyze(check_statics=True)
-    except Exception as e:
-        raise RuntimeError(f"Analysis failed: {e}")
-    
-    return frame, node_calc, member_spec_map
+    return frame
 
 
 def render(frame, deformed_scale=100, opacity=0.25):
@@ -597,7 +417,7 @@ def render(frame, deformed_scale=100, opacity=0.25):
 
 # Example usage
 if __name__ == '__main__':
-    frame, node_calc, spec_map = generate_and_analyze_floor(
+    frame = create_model(
         east_joists=MemberSpec('W60x120', 'joist', quantity=2, padding=0),
         west_joists=MemberSpec('W60x120', 'joist', quantity=2, padding=0),
         tail_joists=MemberSpec('W60x120', 'tail', quantity=1, padding=0),
@@ -605,6 +425,7 @@ if __name__ == '__main__':
         header=MemberSpec('W60x120', 'header', quantity=1),
         planks=MemberSpec('W60x120', 'plank', quantity=8)
     )
+    frame.analyze(check_statics=True)
     render(frame)
 
 
@@ -623,11 +444,11 @@ if __name__ == '__main__':
 #         name = self.spec.name
 
 #         frame.add_node(Naming.node(name, 'S', floor=True), self.x_center, 0, self.z_start)
-#         frame.add_node(Naming.node(name, 'S'), self.x_center, params.floor_to_floor, self.z_start)
+#         frame.add_node(Naming.node(name, 'S'), self.x_center, params.floor_y, self.z_start)
         
 #         if self.spec.beam_type != 'tail':
 #             frame.add_node(Naming.node(name, 'N', floor=True), self.x_center, 0, z_end)
-#             frame.add_node(Naming.node(name, 'N'), self.x_center, params.floor_to_floor, z_end)
+#             frame.add_node(Naming.node(name, 'N'), self.x_center, params.floor_y, z_end)
 #             self.spec.create_section(frame)
 #             frame.add_member(Naming.member(name), Naming.node(name, 'N'), Naming.node(name, 'S'), self.spec.material, self.spec.section_name)
 #         else:
@@ -784,9 +605,9 @@ if __name__ == '__main__':
 #         header_spec = self.header
 #         header_spec.create_section(frame)
 #         frame.add_node(Naming.header_node('E'), self.trimmer_E_x_center, 
-#                        self.params.floor_to_floor, self.header_z_pos)
+#                        self.params.floor_y, self.header_z_pos)
 #         frame.add_node(Naming.header_node('W'), self.trimmer_W_x_center, 
-#                        self.params.floor_to_floor, self.header_z_pos)
+#                        self.params.floor_y, self.header_z_pos)
 #         frame.add_member(Naming.header_member(), Naming.header_node('W'), 
 #                          Naming.header_node('E'), header_spec.material, 
 #                          header_spec.section_name)
@@ -795,7 +616,7 @@ if __name__ == '__main__':
 #         for beam_placement in layout.beams:
 #             if beam_placement.spec.beam_type == 'tail':
 #                 tail_node_name = Naming.tail_header_node(beam_placement.spec.name)
-#                 frame.add_node(tail_node_name, beam_placement.x_center, self.params.floor_to_floor, self.header_z_pos)
+#                 frame.add_node(tail_node_name, beam_placement.x_center, self.params.floor_y, self.header_z_pos)
 #                 frame.add_member(
 #                     Naming.member(beam_placement.spec.name),
 #                     tail_node_name,
@@ -864,102 +685,102 @@ if __name__ == '__main__':
 #                     frame.add_member_dist_load(p.spec.name, 'FY', load_left + load_right, load_left + load_right)
 
 
-# def auto_add_walls(frame, layout, params, wall_thickness, material):
-#     frame.add_node(Naming.corner_node('SW', floor=True), 0, 0, 0)
-#     frame.add_node(Naming.corner_node('SW', floor=False), 0, params.floor_to_floor, 0)
-#     frame.add_node(Naming.corner_node('NW', floor=True), 0, 0, params.beam_length)
-#     frame.add_node(Naming.corner_node('NW', floor=False), 0, params.floor_to_floor, params.beam_length)
-#     frame.add_node(Naming.corner_node('SE', floor=True), params.room_length, 0, 0)
-#     frame.add_node(Naming.corner_node('SE', floor=False), params.room_length, params.floor_to_floor, 0)
-#     frame.add_node(Naming.corner_node('NE', floor=True), params.room_length, 0, params.beam_length)
-#     frame.add_node(Naming.corner_node('NE', floor=False), params.room_length, params.floor_to_floor, params.beam_length)
+def auto_add_walls(frame, layout, params, wall_thickness, material):
+    frame.add_node(Naming.corner_node('SW', floor=True), 0, 0, 0)
+    frame.add_node(Naming.corner_node('SW', floor=False), 0, params.floor_y, 0)
+    frame.add_node(Naming.corner_node('NW', floor=True), 0, 0, params.beam_length)
+    frame.add_node(Naming.corner_node('NW', floor=False), 0, params.floor_y, params.beam_length)
+    frame.add_node(Naming.corner_node('SE', floor=True), params.room_length, 0, 0)
+    frame.add_node(Naming.corner_node('SE', floor=False), params.room_length, params.floor_y, 0)
+    frame.add_node(Naming.corner_node('NE', floor=True), params.room_length, 0, params.beam_length)
+    frame.add_node(Naming.corner_node('NE', floor=False), params.room_length, params.floor_y, params.beam_length)
 
-#     frame.add_quad(
-#         Naming.side_wall('west'),
-#         Naming.corner_node('SW', floor=True),
-#         Naming.corner_node('NW', floor=True),
-#         Naming.corner_node('NW', floor=False),
-#         Naming.corner_node('SW', floor=False),
-#         wall_thickness, material
-#     )
+    frame.add_quad(
+        Naming.side_wall('west'),
+        Naming.corner_node('SW', floor=True),
+        Naming.corner_node('NW', floor=True),
+        Naming.corner_node('NW', floor=False),
+        Naming.corner_node('SW', floor=False),
+        wall_thickness, material
+    )
     
-#     frame.add_quad(
-#         Naming.side_wall('east'),
-#         Naming.corner_node('SE', floor=True),
-#         Naming.corner_node('NE', floor=True),
-#         Naming.corner_node('NE', floor=False),
-#         Naming.corner_node('SE', floor=False),
-#         wall_thickness, material
-#     )
+    frame.add_quad(
+        Naming.side_wall('east'),
+        Naming.corner_node('SE', floor=True),
+        Naming.corner_node('NE', floor=True),
+        Naming.corner_node('NE', floor=False),
+        Naming.corner_node('SE', floor=False),
+        wall_thickness, material
+    )
     
-#     sorted_beams = sorted(layout.beams, key=lambda p: p.x_center)
-#     if sorted_beams:
-#         first_beam = sorted_beams[0]
-#         frame.add_quad(
-#             Naming.wall('corner_W', first_beam.spec.name, 'south'),
-#             Naming.corner_node('SW', floor=True),
-#             Naming.node(first_beam.spec.name, 'S', floor=True),
-#             Naming.node(first_beam.spec.name, 'S'),
-#             Naming.corner_node('SW', floor=False),
-#             wall_thickness, material
-#         )
+    sorted_beams = sorted(layout.beams, key=lambda p: p.x_center)
+    if sorted_beams:
+        first_beam = sorted_beams[0]
+        frame.add_quad(
+            Naming.wall('corner_W', first_beam.spec.name, 'south'),
+            Naming.corner_node('SW', floor=True),
+            Naming.node(first_beam.spec.name, 'S', floor=True),
+            Naming.node(first_beam.spec.name, 'S'),
+            Naming.corner_node('SW', floor=False),
+            wall_thickness, material
+        )
         
-#         for i in range(len(sorted_beams) - 1):
-#             prev_beam = sorted_beams[i]
-#             beam = sorted_beams[i+1]
-#             frame.add_quad(
-#                 Naming.wall(prev_beam.spec.name, beam.spec.name, 'south'),
-#                 Naming.node(prev_beam.spec.name, 'S', floor=True),
-#                 Naming.node(beam.spec.name, 'S', floor=True),
-#                 Naming.node(beam.spec.name, 'S'),
-#                 Naming.node(prev_beam.spec.name, 'S'),
-#                 wall_thickness, material
-#             )
+        for i in range(len(sorted_beams) - 1):
+            prev_beam = sorted_beams[i]
+            beam = sorted_beams[i+1]
+            frame.add_quad(
+                Naming.wall(prev_beam.spec.name, beam.spec.name, 'south'),
+                Naming.node(prev_beam.spec.name, 'S', floor=True),
+                Naming.node(beam.spec.name, 'S', floor=True),
+                Naming.node(beam.spec.name, 'S'),
+                Naming.node(prev_beam.spec.name, 'S'),
+                wall_thickness, material
+            )
 
-#         last_beam = sorted_beams[-1]
-#         frame.add_quad(
-#             Naming.wall(last_beam.spec.name, 'corner_E', 'south'),
-#             Naming.node(last_beam.spec.name, 'S', floor=True),
-#             Naming.corner_node('SE', floor=True),
-#             Naming.corner_node('SE', floor=False),
-#             Naming.node(last_beam.spec.name, 'S'),
-#             wall_thickness, material
-#         )
+        last_beam = sorted_beams[-1]
+        frame.add_quad(
+            Naming.wall(last_beam.spec.name, 'corner_E', 'south'),
+            Naming.node(last_beam.spec.name, 'S', floor=True),
+            Naming.corner_node('SE', floor=True),
+            Naming.corner_node('SE', floor=False),
+            Naming.node(last_beam.spec.name, 'S'),
+            wall_thickness, material
+        )
     
-#     north_reaching_beams = [b for b in layout.beams if b.spec.beam_type not in ['tail', 'header']]
-#     north_reaching_beams.sort(key=lambda p: p.x_center)
-#     if north_reaching_beams:
-#         first_beam = north_reaching_beams[0]
-#         frame.add_quad(
-#             Naming.wall('corner_W', first_beam.spec.name, 'north'),
-#             Naming.corner_node('NW', floor=True),
-#             Naming.node(first_beam.spec.name, 'N', floor=True),
-#             Naming.node(first_beam.spec.name, 'N'),
-#             Naming.corner_node('NW', floor=False),
-#             wall_thickness, material
-#         )
+    north_reaching_beams = [b for b in layout.beams if b.spec.beam_type not in ['tail', 'header']]
+    north_reaching_beams.sort(key=lambda p: p.x_center)
+    if north_reaching_beams:
+        first_beam = north_reaching_beams[0]
+        frame.add_quad(
+            Naming.wall('corner_W', first_beam.spec.name, 'north'),
+            Naming.corner_node('NW', floor=True),
+            Naming.node(first_beam.spec.name, 'N', floor=True),
+            Naming.node(first_beam.spec.name, 'N'),
+            Naming.corner_node('NW', floor=False),
+            wall_thickness, material
+        )
 
-#         for i in range(len(north_reaching_beams) - 1):
-#             prev_beam = north_reaching_beams[i]
-#             beam = north_reaching_beams[i+1]
-#             frame.add_quad(
-#                 Naming.wall(prev_beam.spec.name, beam.spec.name, 'north'),
-#                 Naming.node(prev_beam.spec.name, 'N', floor=True),
-#                 Naming.node(beam.spec.name, 'N', floor=True),
-#                 Naming.node(beam.spec.name, 'N'),
-#                 Naming.node(prev_beam.spec.name, 'N'),
-#                 wall_thickness, material
-#             )
+        for i in range(len(north_reaching_beams) - 1):
+            prev_beam = north_reaching_beams[i]
+            beam = north_reaching_beams[i+1]
+            frame.add_quad(
+                Naming.wall(prev_beam.spec.name, beam.spec.name, 'north'),
+                Naming.node(prev_beam.spec.name, 'N', floor=True),
+                Naming.node(beam.spec.name, 'N', floor=True),
+                Naming.node(beam.spec.name, 'N'),
+                Naming.node(prev_beam.spec.name, 'N'),
+                wall_thickness, material
+            )
 
-#         last_beam = north_reaching_beams[-1]
-#         frame.add_quad(
-#             Naming.wall(last_beam.spec.name, 'corner_E', 'north'),
-#             Naming.node(last_beam.spec.name, 'N', floor=True),
-#             Naming.corner_node('NE', floor=True),
-#             Naming.corner_node('NE', floor=False),
-#             Naming.node(last_beam.spec.name, 'N'),
-#             wall_thickness, material
-#         )
+        last_beam = north_reaching_beams[-1]
+        frame.add_quad(
+            Naming.wall(last_beam.spec.name, 'corner_E', 'north'),
+            Naming.node(last_beam.spec.name, 'N', floor=True),
+            Naming.corner_node('NE', floor=True),
+            Naming.corner_node('NE', floor=False),
+            Naming.node(last_beam.spec.name, 'N'),
+            wall_thickness, material
+        )
 
 
 # @dataclass
@@ -1198,8 +1019,8 @@ if __name__ == '__main__':
 #     plank_spec.create_section(frame)
 #     plank_node_start = 'plank_test_start'
 #     plank_node_end = 'plank_test_end'
-#     frame.add_node(plank_node_start, plank_spec.base/2, DEFAULT_PARAMS.floor_to_floor, DEFAULT_PARAMS.beam_length/2)
-#     frame.add_node(plank_node_end, DEFAULT_PARAMS.room_length - plank_spec.base/2, DEFAULT_PARAMS.floor_to_floor, DEFAULT_PARAMS.beam_length/2)
+#     frame.add_node(plank_node_start, plank_spec.base/2, DEFAULT_PARAMS.floor_y, DEFAULT_PARAMS.beam_length/2)
+#     frame.add_node(plank_node_end, DEFAULT_PARAMS.room_length - plank_spec.base/2, DEFAULT_PARAMS.floor_y, DEFAULT_PARAMS.beam_length/2)
 #     frame.add_member('plank_test', plank_node_end, plank_node_start, plank_spec.material, plank_spec.section_name)
 #     beam_spec_map['plank_test'] = plank_spec
 

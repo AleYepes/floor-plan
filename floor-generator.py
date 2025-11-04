@@ -6,6 +6,7 @@ from Pynite.Rendering import Renderer
 import numpy as np
 import pandas as pd
 from itertools import product
+from test.test_enum import member
 from tqdm.auto import tqdm
 
 
@@ -43,14 +44,6 @@ class Naming:
     @staticmethod
     def tail_header_node(tail_name: str) -> str:
         return f'{tail_name}_header'
-    
-    @staticmethod
-    def plank_intersection_node(plank_index: int, beam_name: str) -> str:
-        return f'plank_{plank_index}_at_{beam_name}'
-    
-    @staticmethod
-    def plank_member(plank_index: int, segment_index: int) -> str:
-        return f'plank_{plank_index}_seg_{segment_index}'
 
 
 @dataclass
@@ -331,11 +324,11 @@ class NodeCalculator:
     
     def calculate_all_nodes(self) -> List[NodeLocation]:
         nodes = []
-        joist_positions = self.calculate_member_centerlines()
-        plank_positions = joist_positions.pop('planks', None)
+        beam_positions = self.calculate_member_centerlines()
+        plank_positions = beam_positions.pop('planks', None)
         
         # Add joist nodes
-        for group_name, group_positions in joist_positions.items():
+        for group_name, group_positions in beam_positions.items():
             if group_name != 'planks':
                 for name, x in group_positions:
                     nodes.append(NodeLocation(f'{name}_S_floor', x, self.floor_y, 0))
@@ -360,7 +353,7 @@ class NodeCalculator:
         # Add plank intersection nodes
         for z in plank_positions:
             x_intersections = []
-            for group_positions in joist_positions.values():
+            for group_positions in beam_positions.values():
                 x_intersections.extend([(name, x) for name, x in group_positions])
             x_intersections.extend([('trimmer_E', self.trimmer_E_x), ('trimmer_W', self.trimmer_W_x)])
             x_intersections.sort(key=lambda t: t[1])
@@ -384,80 +377,131 @@ class NodeCalculator:
         return nodes
 
 
-class MemberBuilder:
-    def __init__(self,
-        node_calculator: NodeCalculator,
-        east_joists: MemberSpec,
-        west_joists: MemberSpec,
-        tail_joists: MemberSpec,
-        trimmers: MemberSpec,
-        header: MemberSpec,
-        planks: Optional[MemberSpec]):
+def _calculate_evenly_spaced_positions(
+    n: int, 
+    clear_start: float, 
+    clear_end: float, 
+    member_base: float,
+    distribution: Literal['start_aligned', 'end_aligned', 'centered']) -> List[float]:
 
-        self.calc = node_calculator
-        self.east_joists = east_joists
-        self.west_joists = west_joists
-        self.tail_joists = tail_joists
-        self.trimmers = trimmers
-        self.header = header
-        self.planks = planks
+    if n == 0:
+        return []
     
-    def build_all_members(self) -> List[MemberLocation]:
-        members = []
-        joist_positions = self.calc.calculate_member_centerlines()
-        plank_positions = joist_positions.pop('planks', None)
-        
-        for name, x in joist_positions.get('east', []):
-            members.append(MemberLocation(name=name, node_i=f'{name}_N', node_j=f'{name}_S', spec=self.east_joists))
-        
-        for name, x in joist_positions.get('west', []):
-            members.append(MemberLocation(name=name, node_i=f'{name}_N', node_j=f'{name}_S', spec=self.west_joists))
-        
-        for name, x in joist_positions.get('tail', []):
-            members.append(MemberLocation(name=name, node_i=f'{name}_header', node_j=f'{name}_S', spec=self.tail_joists))
-        
-        for name in ['trimmer_E', 'trimmer_W']:
-            members.append(MemberLocation(name=name, node_i=f'{name}_N', node_j=f'{name}_S', spec=self.trimmers))
-        
-        members.append(MemberLocation(name='header', node_i='header_W', node_j='header_E', spec=self.header))
-        
-        # Planks
-        x_intersections = []
-        for group_positions in joist_positions.values():
-            x_intersections.extend([name for name, x in group_positions])
-        x_intersections.extend(['trimmer_E', 'trimmer_W'])
-        
-        # Sort by actual x coordinate
-        x_coords = {}
-        for name in x_intersections:
-            if name.startswith('E') or name.startswith('T') or name.startswith('W'):
-                for group_positions in joist_positions.values():
-                    for jname, x in group_positions:
-                        if jname == name:
-                            x_coords[name] = x
-                            break
-            elif name == 'trimmer_E':
-                x_coords[name] = self.calc.trimmer_E_x
-            elif name == 'trimmer_W':
-                x_coords[name] = self.calc.trimmer_W_x
-        
-        sorted_intersections = sorted(x_intersections, key=lambda n: x_coords[n])
-        
-        # Create plank segments
-        for plank_name, z in plank_positions:
-            for i in range(len(sorted_intersections) - 1):
-                member_name = f'{plank_name}_seg{i}'
-                node_i = f'{plank_name}_at_{sorted_intersections[i]}'
-                node_j = f'{plank_name}_at_{sorted_intersections[i+1]}'
-                
-                members.append(MemberLocation(
-                    name=member_name,
-                    node_i=node_j,
-                    node_j=node_i,
-                    spec=self.planks
-                ))
-        
-        return members
+    if distribution == 'start_aligned':
+        centerline_start = clear_start + member_base / 2
+        centerline_end = clear_end + member_base / 2
+        positions = np.linspace(centerline_start, centerline_end, n + 1).tolist()
+        return positions[:-1]
+    
+    elif distribution == 'end_aligned':
+        centerline_start = clear_start - member_base / 2
+        centerline_end = clear_end - member_base / 2
+        positions = np.linspace(centerline_end, centerline_start, n + 1).tolist()
+        return positions[:-1]
+    
+    elif distribution == 'centered':
+        centerline_start = clear_start + member_base / 2
+        centerline_end = clear_end - member_base / 2
+        positions = np.linspace(centerline_start, centerline_end, n + 2).tolist()
+        return positions[1:-1]
+    
+    else:
+        raise ValueError(f"Unknown distribution: {distribution}")
+    
+
+def calculate_geometry_and_members(
+    east_joists: MemberSpec,
+    west_joists: MemberSpec,
+    tail_joists: MemberSpec,
+    trimmers: MemberSpec,
+    header: MemberSpec,
+    planks: MemberSpec,
+    params: DesignParameters) -> Tuple[List[NodeLocation], List[MemberLocation]]:
+
+    assert trimmers.quantity == 2, "Must have exactly 2 trimmers"
+    assert header.quantity == 1, "Must have exactly 1 header"
+    
+    # Key geometry
+    opening_x_start = params.opening_x_start
+    opening_x_end = opening_x_start + params.opening_length
+    trimmer_E_x = opening_x_start - (trimmers.base / 2)
+    trimmer_W_x = opening_x_end + (trimmers.base / 2)
+    header_z = (params.beam_length - params.opening_width - params.wall_beam_contact_depth/2 - header.base/2)
+    floor_y = 0
+    ceiling_y = params.floor_to_floor
+    
+    # Beam centerline positions
+    beam_positions = {}
+    if east_joists.quantity > 0:
+        clear_start = east_joists.padding
+        clear_end = trimmer_E_x - trimmers.base / 2
+        x_positions = _calculate_evenly_spaced_positions(east_joists.quantity, clear_start, clear_end, east_joists.base, 'start_aligned')
+        beam_positions['east'] = [(f'east{i}', x) for i, x in enumerate(x_positions)]
+    
+    if tail_joists.quantity > 0:
+        clear_start = opening_x_start + tail_joists.padding
+        clear_end = opening_x_end - tail_joists.padding
+        x_positions = _calculate_evenly_spaced_positions(tail_joists.quantity, clear_start, clear_end, tail_joists.base, 'centered')
+        beam_positions['tail'] = [(f'tail{i}', x) for i, x in enumerate(x_positions)]
+    
+    if west_joists.quantity > 0:
+        clear_start = trimmer_W_x + trimmers.base / 2
+        clear_end = params.room_length - west_joists.padding - west_joists.base
+        x_positions = _calculate_evenly_spaced_positions(west_joists.quantity, clear_start, clear_end, west_joists.base, 'end_aligned')
+        beam_positions['west'] = [(f'west{i}', x) for i, x in enumerate(x_positions)]
+    
+    beam_positions['trimmer'] = [('trimmer_E', trimmer_E_x), ('trimmer_W', trimmer_W_x)]
+
+    # Plank centerline positions
+    clear_start = 0 + params.wall_beam_contact_depth
+    clear_end = params.room_length - params.wall_beam_contact_depth
+    z_positions = _calculate_evenly_spaced_positions(planks.quantity, clear_start, clear_end, planks.base, 'centered')
+    plank_positions = [(f'P{i}', z) for i, z in enumerate(z_positions)]
+    
+    # Beam nodes and member locations
+    nodes = []
+    for group_name, group_positions in beam_positions.items():
+        for name, x in group_positions:
+            nodes.append(NodeLocation(f'{name}_S_floor', x, floor_y, 0))
+            nodes.append(NodeLocation(f'{name}_N_floor', x, floor_y, params.beam_length))
+            nodes.append(NodeLocation(f'{name}_S', x, ceiling_y, 0))
+            if group_name == 'tail':
+                nodes.append(NodeLocation(f'{name}_N', x, ceiling_y, header_z)) # Tails connect to header (header_z), not to wall (beam_length)
+            else:
+                nodes.append(NodeLocation(f'{name}_N', x, ceiling_y, params.beam_length))
+    
+    nodes.append(NodeLocation('header_E', trimmer_E_x, ceiling_y, header_z))
+    nodes.append(NodeLocation('header_W', trimmer_W_x, ceiling_y, header_z))
+    
+    members = [MemberLocation(name=name, node_i=f'{name}_N', node_j=f'{name}_S', spec=east_joists) for name, x in beam_positions]
+    members.append(MemberLocation(name='header', node_i='header_W', node_j='header_E', spec=header))
+
+    # Corner nodes
+    walls = [('E', 0), ('W', params.room_length)]
+    for corner_name, x in walls:
+        nodes.append(NodeLocation(f'S{corner_name}', x, ceiling_y, 0))
+        nodes.append(NodeLocation(f'N{corner_name}', x, ceiling_y, params.beam_length))
+        nodes.append(NodeLocation(f'S{corner_name}_floor', x, floor_y, 0))
+        nodes.append(NodeLocation(f'N{corner_name}_floor', x, floor_y, params.beam_length))
+
+    # Plank nodes and member locations
+    plank_series = {}
+    beam_positions['walls'] = walls # So planks extend to walls
+    for plank_name, z in plank_positions:
+        plank_nodes = []
+        for group_positions in beam_positions.values():
+            for beam_name, x in group_positions:
+                intersection_node = NodeLocation(f'{plank_name}-{beam_name}', x, ceiling_y, z)
+                plank_nodes.append(intersection_node)
+                nodes.append(intersection_node)
+        plank_series[plank_name] = plank_nodes
+    
+    for plank_name, plank_nodes in plank_series.items():
+        plank_nodes.sort(lambda node: node.x)
+        for i, _ in enumerate(plank_nodes):
+            members.append(MemberLocation(name=f'{plank_name}_{i}', node_i=plank_nodes[i], node_j=plank_nodes[i+1], spec=planks))
+    
+    return nodes, members
 
 
 class FrameAssembler:
@@ -502,24 +546,11 @@ def generate_and_analyze_floor(
     tail_joists: MemberSpec,
     trimmers: MemberSpec,
     header: MemberSpec,
-    planks: Optional[MemberSpec] = None,
+    planks: MemberSpec,
     params: DesignParameters = DEFAULT_PARAMS) -> Tuple:
     
-    # Step 1: Calculate all node positions
-    node_calc = NodeCalculator(
-        east_joists, west_joists, tail_joists, 
-        trimmers, header, planks, params
-    )
-    nodes = node_calc.calculate_all_nodes()
-    
-    # Step 2: Build member definitions
-    member_builder = MemberBuilder(
-        node_calc, east_joists, west_joists, 
-        tail_joists, trimmers, header, planks
-    )
-    members = member_builder.build_all_members()
-    
-    # Step 3: Assemble FE model
+    nodes, members = calculate_geometry_and_members(east_joists, west_joists, tail_joists, trimmers, header, planks, params)
+
     assembler = FrameAssembler(params)
     frame, member_spec_map = assembler.assemble_frame(nodes, members)
     
@@ -644,7 +675,7 @@ if __name__ == '__main__':
         
 #         self.opening_z_start = self.params.opening_width + self.params.wall_beam_contact_depth/2
 
-#     def _resolve_joist_positions(self, n: int, clear_start: float, clear_end: float, beam_base: float, group: str) -> List[float]:
+#     def _resolve_beam_positions(self, n: int, clear_start: float, clear_end: float, beam_base: float, group: str) -> List[float]:
 #         def east_positions(n, clear_start, clear_end, beam_base):
 #             centerline_start = clear_start + beam_base / 2
 #             centerline_end = clear_end + beam_base / 2
@@ -687,7 +718,7 @@ if __name__ == '__main__':
 #             )
 #             clear_start = self.east_joists.padding
 #             clear_end = self.trimmer_E_x_center - self.trimmers.base / 2
-#             east_positions = self._resolve_joist_positions(
+#             east_positions = self._resolve_beam_positions(
 #                 self.east_joists.quantity, 
 #                 clear_start, 
 #                 clear_end, 
@@ -707,7 +738,7 @@ if __name__ == '__main__':
 #             )
 #             clear_start = self.opening_x_start + self.tail_joists.padding
 #             clear_end = self.opening_x_end - self.tail_joists.padding
-#             tail_positions = self._resolve_joist_positions(
+#             tail_positions = self._resolve_beam_positions(
 #                 self.tail_joists.quantity, 
 #                 clear_start, 
 #                 clear_end, 
@@ -727,7 +758,7 @@ if __name__ == '__main__':
 #             )
 #             clear_start = self.trimmer_W_x_center + self.trimmers.base / 2
 #             clear_end = self.params.room_length - self.west_joists.padding - self.west_joists.base
-#             west_positions = self._resolve_joist_positions(
+#             west_positions = self._resolve_beam_positions(
 #                 self.west_joists.quantity, 
 #                 clear_start,
 #                 clear_end,

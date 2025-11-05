@@ -5,11 +5,14 @@ from Pynite import FEModel3D
 from Pynite.Rendering import Renderer
 import numpy as np
 import pandas as pd
-
+from collections import defaultdict
 from skopt import gp_minimize
 from skopt.space import Integer, Categorical, Real
 from skopt.utils import use_named_args
 import warnings
+
+import bisect
+import heapq
 
 
 @dataclass
@@ -36,7 +39,13 @@ class DesignParameters:
     @property
     def opening_z(self):
         return self.beam_length - self.opening_width - self.wall_beam_contact_depth/2
-
+    
+# Units are mm, N, and MPa (N/mm²)
+INPUT_PARAMS = pd.read_csv('data/design_parameters.csv').iloc[0].to_dict()
+INPUT_PARAMS = DesignParameters(**INPUT_PARAMS)
+MATERIAL_STRENGTHS = pd.read_csv('data/material_strengths.csv').set_index('material').to_dict(orient='index')
+MATERIAL_CATALOG = pd.read_csv('data/material_catalog.csv')
+MATERIAL_CATALOG['id'] = (MATERIAL_CATALOG['material'] + '_' + MATERIAL_CATALOG['base'].astype(str) + 'x' + MATERIAL_CATALOG['height'].astype(str))
 
 @dataclass
 class CrossSectionProperties:
@@ -73,7 +82,6 @@ class CrossSectionProperties:
         J = (2 * flange_width * flange_thickness**3 + web_height * web_thickness**3) / 3
         return cls(A=A, Iy=Iy, Iz=Iz, J=J)
 
-
 @dataclass
 class MemberSpec:
     catalog_id: str
@@ -81,8 +89,7 @@ class MemberSpec:
     padding: Optional[float] = None
     
     def __post_init__(self):
-        BEAM_CATALOG['id'] = (BEAM_CATALOG['material'] + BEAM_CATALOG['base'].astype(str) + 'x' + BEAM_CATALOG['height'].astype(str))
-        self._catalog_data = BEAM_CATALOG[BEAM_CATALOG['id'] == self.catalog_id].iloc[0]
+        self._catalog_data = MATERIAL_CATALOG[MATERIAL_CATALOG['id'] == self.catalog_id].iloc[0]
         self.material = self._catalog_data['material']
         self.base = self._catalog_data['base']
         self.height = self._catalog_data['height']
@@ -105,17 +112,6 @@ class MemberSpec:
         if self.section_name not in frame.sections:
             geom = self.get_geometry()
             frame.add_section(self.section_name, geom.A, geom.Iy, geom.Iz, geom.J)
-    
-    def get_volume(self, length: float) -> float:
-        return self.get_geometry().A * length # mm^3
-    
-    def get_cost(self, length: float) -> float:
-        volume_m3 = self.get_volume(length) / 1e9  # Convert mm^3 to m^3
-        return volume_m3 * self.cost_per_m3
-    
-    def copy(self, **kwargs):
-        return replace(self, **kwargs)
-
 
 @dataclass
 class NodeLocation:
@@ -123,7 +119,6 @@ class NodeLocation:
     X: float
     Y: float
     Z: float
-
 
 @dataclass
 class Member:
@@ -259,10 +254,14 @@ def calculate_nodes_and_members(
 def assemble_frame(nodes: List[NodeLocation], members: List[Member]) -> Tuple[FEModel3D, Dict[str, MemberSpec]]:
     frame = FEModel3D()
     for mat_name, props in MATERIAL_STRENGTHS.items():
+        if props['G'] is None:
+            G = props['E'] / (2 * (1 + props['nu']))
+        else:
+            G = props['G']
         frame.add_material(
             mat_name,
             E=props['E'],
-            G=props['E'] / (2 * (1 + props['nu'])),
+            G=G,
             nu=props['nu'],
             rho=props['rho']
         )
@@ -356,6 +355,35 @@ def apply_loads(frame, members):
         frame.add_member_dist_load(member.name, 'FY', live_load, live_load)
 
 
+def calculate_purchase_quantity(required_lengths: List[float], stock_length: float) -> Tuple[int, List[List[float]]]:
+    required_lengths.sort(reverse=True)
+
+    bins_cuts: List[List[float]] = []
+    bins_remaining: List[float] = []
+    for length in required_lengths:
+        index = bisect.bisect_left(bins_remaining, length)
+
+        if index < len(bins_remaining):
+            old_remaining = bins_remaining.pop(index)
+            cuts = bins_cuts.pop(index)
+            
+            cuts.append(length)
+            new_remaining = old_remaining - length
+            
+            new_index = bisect.bisect_left(bins_remaining, new_remaining)
+            bins_remaining.insert(new_index, new_remaining)
+            bins_cuts.insert(new_index, cuts)
+            
+        else:
+            new_remaining = stock_length - length
+            
+            new_index = bisect.bisect_left(bins_remaining, new_remaining)
+            bins_remaining.insert(new_index, new_remaining)
+            bins_cuts.insert(new_index, [length])
+
+    return len(bins_cuts), bins_cuts
+
+
 def create_model(
     east_joists: MemberSpec,
     west_joists: MemberSpec,
@@ -363,14 +391,28 @@ def create_model(
     trimmers: MemberSpec,
     header: MemberSpec,
     planks: MemberSpec,
-    walls: bool) -> Tuple:
+    walls: bool = True) -> Tuple:
     
     nodes, members = calculate_nodes_and_members(east_joists, west_joists, tail_joists, trimmers, header, planks)
     frame = assemble_frame(nodes, members)
     define_supports(frame, nodes, INPUT_PARAMS.wall_thickness, 'brick', walls=walls)
     apply_loads(frame, members)
+
+    materials = defaultdict(list)
+    for member in members:
+        pynite_member = frame.members[member.name]
+        materials[member.spec.catalog_id].append(pynite_member.L())
+
+    total_cost = 0.0
+    for catalog_id, lengths in materials.items():
+        catalog_data = MATERIAL_CATALOG[MATERIAL_CATALOG['id'] == catalog_id].iloc[0]
+        stock_length = catalog_data['length']
+        cost_per_beam = catalog_data['cost_unit']
+        
+        num_beams_to_buy, cuts = calculate_purchase_quantity(lengths, stock_length)
+        total_cost += num_beams_to_buy * cost_per_beam
     
-    return frame
+    return frame, nodes, members, total_cost
 
 
 def render(frame, deformed_scale=100, opacity=0.25):
@@ -390,97 +432,108 @@ def render(frame, deformed_scale=100, opacity=0.25):
     rndr.render_model()
 
 
+
 def create_optimization_objective(
-    catalog: pd.DataFrame,
-    material_strengths: Dict,
     objective_weights: Dict[str, float] = None,
     max_deflection_limit: float = 10.0):
     
     if objective_weights is None:
-        objective_weights = {'cost': 0.6, 'deflection': 0.3, 'volume': 0.1}
-    
-    # Normalize weights
+        objective_weights = {'cost': 0.6, 'deflection': 0.3}
     total_weight = sum(objective_weights.values())
     objective_weights = {k: v/total_weight for k, v in objective_weights.items()}
     
     def objective(params_dict: Dict) -> float:
-        """
-        Objective function that creates and analyzes a floor configuration.
-        Returns a scalar cost to minimize.
-        """
         try:
-            # Create MemberSpec objects from parameters
-            east_joists = MemberSpec(
-                catalog_id=params_dict['east_material'],
-                quantity=params_dict.get('east_quantity', 0),
-                padding=params_dict.get('east_padding', 0)
-            )
+            east_joists = MemberSpec(params_dict['east_material'], quantity=params_dict['east_quantity'], padding=params_dict['east_padding'])
+            west_joists = MemberSpec(params_dict['west_material'], quantity=params_dict['west_quantity'], padding=params_dict['west_padding'])
+            tail_joists = MemberSpec(params_dict['tail_material'], quantity=params_dict['tail_quantity'], padding=params_dict['tail_padding'])
+            trimmers = MemberSpec(params_dict['trimmer_material'], quantity=2)
+            header = MemberSpec(params_dict['header_material'], quantity=1)
+            planks = MemberSpec(params_dict['plank_material'])
             
-            west_joists = MemberSpec(
-                catalog_id=params_dict['west_material'],
-                quantity=params_dict.get('west_quantity', 0),
-                padding=params_dict.get('west_padding', 0)
-            )
-            
-            tail_joists = MemberSpec(
-                catalog_id=params_dict['tail_material'],
-                quantity=params_dict.get('tail_quantity', 0),
-                padding=params_dict.get('tail_padding', 0)
-            )
-            
-            trimmers = MemberSpec(
-                catalog_id=params_dict['trimmer_material'],
-                quantity=2
-            )
-            
-            header = MemberSpec(
-                catalog_id=params_dict['header_material'],
-                quantity=1
-            )
-            
-            planks = MemberSpec(catalog_id=params_dict['plank_material'])
-            
-            # Create and analyze model
-            frame = create_model(
+            frame, _, members, total_cost = create_model(
                 east_joists=east_joists,
                 west_joists=west_joists,
                 tail_joists=tail_joists,
                 trimmers=trimmers,
                 header=header,
-                planks=planks,
-                walls=True
+                planks=planks
             )
-            
-            # Analyze
             frame.analyze(check_statics=True)
             
-            # Calculate metrics
-            total_cost = 0
-            total_volume = 0
+            results = []
+            for member in members:
+                pynite_member = frame.members[member.name]
+                spec = member.spec
+                geom = spec.get_geometry()
+                strengths = MATERIAL_STRENGTHS[spec.material]
+
+                # Bending Stress heck
+                # Get max moment. For a floor joist, this is typically about the strong axis (Z-axis in Pynite)
+                max_moment = max(abs(pynite_member.max_moment('Mz')), abs(pynite_member.min_moment('Mz')))
+                section_modulus_z = geom.Iz / (spec.height / 2)
+                
+                if section_modulus_z > 0:
+                    bending_stress = max_moment / section_modulus_z
+                else:
+                    bending_stress = 0
+                    
+                bending_strength = strengths['f_mk']
+                bending_utilization = bending_stress / bending_strength
+
+                # Shear Stress Check
+                # Get max shear force (typically FY for gravity loads)
+                max_shear = max(abs(pynite_member.max_shear('Fy')), abs(pynite_member.min_shear('Fy')))
+
+                # Max shear stress for a rectangular section
+                if geom.A > 0 and spec.shape == 'rectangular':
+                    shear_stress = 1.5 * (max_shear / geom.A)
+                else:
+                    # Note: Shear stress calculation for I-beams is more complex, often dominated by the web.
+                    # This is a simplification. A more detailed analysis would be needed for I-beams.
+                    shear_stress = max_shear / geom.A 
+
+                shear_strength = strengths['f_vk']
+                shear_utilization = shear_stress / shear_strength if shear_strength > 0 else 0
+                
+                # Deflection Check
+                # Pynite calculates nodal displacements. Getting local member deflection is more involved.
+                # A simple proxy is to check the max vertical displacement of the member's nodes.
+                node_i_disp = frame.nodes[member.node_i].DY['Combo 1'] # Assuming one load combo
+                node_j_disp = frame.nodes[member.node_j].DY['Combo 1']
+                max_deflection = min(node_i_disp, node_j_disp) # Downward is negative
+
+                results.append({
+                    'Member': member.name,
+                    'Type': spec.catalog_id,
+                    'Max Moment (N-mm)': max_moment,
+                    'Bending Stress (MPa)': bending_stress,
+                    'Bending Strength (MPa)': bending_strength,
+                    'Bending Utilization': f"{bending_utilization:.2%}",
+                    'Max Shear (N)': max_shear,
+                    'Shear Stress (MPa)': shear_stress,
+                    'Shear Strength (MPa)': shear_strength,
+                    'Shear Utilization': f"{shear_utilization:.2%}",
+                    'Max Deflection (mm)': max_deflection
+                })
+
+            results_df = pd.DataFrame(results)
+            print(results_df.to_string())
+
+            # Identify failing members
+            failing_bending = results_df[results_df['Bending Utilization'].str.rstrip('%').astype(float) > 100]
+            failing_shear = results_df[results_df['Shear Utilization'].str.rstrip('%').astype(float) > 100]
+
+            if not failing_bending.empty:
+                print(failing_bending[['Member', 'Type', 'Bending Utilization']])
+            if not failing_shear.empty:
+                print(failing_shear[['Member', 'Type', 'Shear Utilization']])
+
+
+
             max_deflection = 0
             max_stress_ratio = 0
-            
-            for member_name, member in frame.members.items():
-                # Get member spec (reconstruct to get properties)
-                if member_name.startswith('east'):
-                    spec = east_joists
-                elif member_name.startswith('west'):
-                    spec = west_joists
-                elif member_name.startswith('tail'):
-                    spec = tail_joists
-                elif member_name.startswith('trimmer'):
-                    spec = trimmers
-                elif member_name == 'header':
-                    spec = header
-                elif member_name.startswith('p'):
-                    spec = planks
-                else:
-                    continue
-                
-                # Cost and volume
-                length = member.L()
-                total_cost += spec.get_cost(length)
-                total_volume += spec.get_volume(length)
+            for member_name, pynite_member in frame.members.items():
                 
                 # Deflection
                 deflection = abs(member.min_deflection('dy', 'Combo 1'))
@@ -498,7 +551,7 @@ def create_optimization_objective(
                 
                 # Calculate stress ratios
                 geom = spec.get_geometry()
-                mat_props = material_strengths[spec.material]
+                mat_props = MATERIAL_STRENGTHS[spec.material]
                 
                 c = spec.height / 2
                 bending_stress = abs(max_moment * c / geom.Iz)
@@ -507,7 +560,7 @@ def create_optimization_objective(
                 if spec.shape == 'rectangular':
                     shear_stress = 1.5 * abs(max_shear) / geom.A
                 else:  # I-beam
-                    catalog_data = catalog[catalog['id'] == spec.catalog_id].iloc[0]
+                    catalog_data = MATERIAL_CATALOG[MATERIAL_CATALOG['id'] == spec.catalog_id].iloc[0]
                     web_area = (spec.height - 2*catalog_data['flange_thickness']) * catalog_data['web_thickness']
                     shear_stress = abs(max_shear) / web_area
                 
@@ -515,7 +568,6 @@ def create_optimization_objective(
                 
                 max_stress_ratio = max(max_stress_ratio, bending_ratio, shear_ratio)
             
-            # Check constraints
             if max_deflection > max_deflection_limit:
                 # Penalize configurations that exceed deflection limit
                 penalty = 1000 * (max_deflection - max_deflection_limit)
@@ -528,121 +580,62 @@ def create_optimization_objective(
             
             # Normalize metrics for multi-objective optimization
             # Note: These normalization factors should be adjusted based on expected ranges
-            normalized_cost = total_cost / 1000  # Assuming costs in range 0-10000
             normalized_deflection = max_deflection / max_deflection_limit
-            normalized_volume = (total_volume / 1e9) / 1.0  # Volume in m³, normalized by 1 m³
             
-            # Weighted sum of objectives
             objective_value = (
-                objective_weights.get('cost', 0) * normalized_cost +
-                objective_weights.get('deflection', 0) * normalized_deflection +
-                objective_weights.get('volume', 0) * normalized_volume
+                objective_weights['cost'] +
+                objective_weights['deflection'] * normalized_deflection
             )
             
             return objective_value
             
         except Exception as e:
-            # Return high penalty for invalid configurations
             warnings.warn(f"Configuration failed: {str(e)}")
             return 1e6
     
     return objective
 
 
-def setup_search_space(catalog: pd.DataFrame) -> Tuple[list, list]:
-    """
-    Sets up the search space for Bayesian optimization.
-    
-    Args:
-        catalog: Beam catalog dataframe
-    
-    Returns:
-        Tuple of (space, dimension_names)
-    """
-    
-    # Get available catalog IDs
-    available_ids = catalog['id'].unique().tolist()
-    
-    # Define search space
+def setup_search_space() -> Tuple[list, list]:
+    beam_ids = MATERIAL_CATALOG[MATERIAL_CATALOG['type'] == 'beam']['id'].unique().tolist()
+    double_ids = MATERIAL_CATALOG[MATERIAL_CATALOG['type'] == 'double']['id'].unique().tolist()
+    floor_ids = MATERIAL_CATALOG[MATERIAL_CATALOG['type'] == 'floor']['id'].unique().tolist()
     space = [
-        # East joists
-        Categorical(available_ids, name='east_material'),
-        Integer(0, 5, name='east_quantity'),
-        Real(0, 200, name='east_padding'),
+        Categorical(beam_ids, name='east_material'),
+        Integer(1, 3, name='east_quantity'),
+        Integer(0, 400, name='east_padding'),
         
-        # West joists
-        Categorical(available_ids, name='west_material'),
-        Integer(0, 5, name='west_quantity'),
-        Real(0, 200, name='west_padding'),
+        Categorical(beam_ids, name='west_material'),
+        Integer(1, 3, name='west_quantity'),
+        Integer(0, 400, name='west_padding'),
         
-        # Tail joists
-        Categorical(available_ids, name='tail_material'),
-        Integer(0, 5, name='tail_quantity'),
-        Real(0, 200, name='tail_padding'),
+        Categorical(beam_ids, name='tail_material'),
+        Integer(1, 3, name='tail_quantity'),
+        Integer(0, 400, name='tail_padding'),
         
-        # Trimmers (no quantity/padding optimization)
-        Categorical(available_ids, name='trimmer_material'),
-        
-        # Header (no quantity/padding optimization)
-        Categorical(available_ids, name='header_material'),
-        
-        # Planks
-        Categorical(available_ids, name='plank_material'),
+        Categorical(beam_ids + double_ids, name='trimmer_material'),
+        Categorical(beam_ids + double_ids, name='header_material'),  
+        Categorical(floor_ids, name='plank_material'),
     ]
-    
     dimension_names = [dim.name for dim in space]
     
     return space, dimension_names
 
 
 def run_bayesian_optimization(
-    catalog: pd.DataFrame,
-    design_params: DesignParameters,
-    material_strengths: Dict,
     n_calls: int = 50,
     n_initial_points: int = 10,
     objective_weights: Dict[str, float] = None,
     max_deflection_limit: float = 10.0,
-    random_state: int = 42
-) -> Dict:
-    """
-    Runs Bayesian optimization to find optimal floor configuration.
-    
-    Args:
-        catalog: Beam catalog dataframe
-        design_params: Design parameters instance
-        material_strengths: Material properties dictionary
-        n_calls: Number of optimization iterations
-        n_initial_points: Number of random initial points
-        objective_weights: Weights for multi-objective optimization
-        max_deflection_limit: Maximum allowable deflection in mm
-        random_state: Random seed for reproducibility
-    
-    Returns:
-        Dictionary containing optimization results
-    """
-    
-    # Setup search space
-    space, dimension_names = setup_search_space(catalog)
-    
-    # Create objective function
-    objective_fn = create_optimization_objective(
-        catalog=catalog,
-        design_params=design_params,
-        material_strengths=material_strengths,
-        objective_weights=objective_weights,
-        max_deflection_limit=max_deflection_limit
-    )
+    random_state: int = 42) -> Dict:
+
+    space, dimension_names = setup_search_space()
+    objective_fn = create_optimization_objective(objective_weights, max_deflection_limit)
     
     # Wrapper for use_named_args decorator
     @use_named_args(space)
     def objective_wrapper(**params):
         return objective_fn(params)
-    
-    # Run optimization
-    print(f"Starting Bayesian optimization with {n_calls} iterations...")
-    print(f"Search space: {len(space)} dimensions")
-    print(f"Initial random points: {n_initial_points}")
     
     result = gp_minimize(
         objective_wrapper,
@@ -651,15 +644,11 @@ def run_bayesian_optimization(
         n_initial_points=n_initial_points,
         random_state=random_state,
         verbose=True,
-        n_jobs=1  # Set to -1 for parallel evaluation if possible
+        n_jobs=-1
     )
     
-    # Extract best parameters
-    best_params = {name: val for name, val in zip(dimension_names, result.x)}
-    
-    # Create summary
     optimization_summary = {
-        'best_params': best_params,
+        'best_params': {name: val for name, val in zip(dimension_names, result.x)},
         'best_objective_value': result.fun,
         'n_calls': len(result.func_vals),
         'all_objective_values': result.func_vals,
@@ -672,69 +661,18 @@ def run_bayesian_optimization(
         }
     }
     
-    print("\n" + "="*70)
-    print("OPTIMIZATION COMPLETE")
-    print("="*70)
-    print(f"\nBest objective value: {result.fun:.4f}")
-    print("\nBest configuration:")
-    for name, value in best_params.items():
-        print(f"  {name}: {value}")
-    
     return optimization_summary
 
 
-def evaluate_configuration(
-    params_dict: Dict,
-    catalog: pd.DataFrame,
-    design_params: DesignParameters,
-    material_strengths: Dict
-) -> Dict:
-    """
-    Evaluate a specific configuration and return detailed metrics.
+def evaluate_configuration(params_dict: Dict) -> Dict:    
+    east_joists = MemberSpec(params_dict['east_material'], quantity=params_dict['east_quantity'], padding=params_dict['east_padding'])
+    west_joists = MemberSpec(params_dict['west_material'], quantity=params_dict['west_quantity'], padding=params_dict['west_padding'])
+    tail_joists = MemberSpec(params_dict['tail_material'], quantity=params_dict['tail_quantity'], padding=params_dict['tail_padding'])
+    trimmers = MemberSpec(params_dict['trimmer_material'], quantity=2)
+    header = MemberSpec(params_dict['header_material'], quantity=1)
+    planks = MemberSpec(params_dict['plank_material'])
     
-    Args:
-        params_dict: Dictionary of parameter values
-        catalog: Beam catalog dataframe
-        design_params: Design parameters instance
-        material_strengths: Material properties dictionary
-    
-    Returns:
-        Dictionary with detailed performance metrics
-    """
-    
-    # Create MemberSpec objects
-    east_joists = MemberSpec(
-        catalog_id=params_dict['east_material'],
-        quantity=params_dict.get('east_quantity', 0),
-        padding=params_dict.get('east_padding', 0)
-    )
-    
-    west_joists = MemberSpec(
-        catalog_id=params_dict['west_material'],
-        quantity=params_dict.get('west_quantity', 0),
-        padding=params_dict.get('west_padding', 0)
-    )
-    
-    tail_joists = MemberSpec(
-        catalog_id=params_dict['tail_material'],
-        quantity=params_dict.get('tail_quantity', 0),
-        padding=params_dict.get('tail_padding', 0)
-    )
-    
-    trimmers = MemberSpec(
-        catalog_id=params_dict['trimmer_material'],
-        quantity=2
-    )
-    
-    header = MemberSpec(
-        catalog_id=params_dict['header_material'],
-        quantity=1
-    )
-    
-    planks = MemberSpec(catalog_id=params_dict['plank_material'])
-    
-    # Create and analyze model
-    frame = create_model(
+    frame, nodes, members, total_cost = create_model(
         east_joists=east_joists,
         west_joists=west_joists,
         tail_joists=tail_joists,
@@ -743,10 +681,8 @@ def evaluate_configuration(
         planks=planks,
         walls=True
     )
-    
     frame.analyze(check_statics=True)
     
-    # Collect detailed metrics
     metrics = {
         'total_cost': 0,
         'total_volume_m3': 0,
@@ -790,7 +726,7 @@ def evaluate_configuration(
         )
         
         geom = spec.get_geometry()
-        mat_props = material_strengths[spec.material]
+        mat_props = MATERIAL_STRENGTHS[spec.material]
         
         c = spec.height / 2
         bending_stress = abs(max_moment * c / geom.Iz)
@@ -799,7 +735,7 @@ def evaluate_configuration(
         if spec.shape == 'rectangular':
             shear_stress = 1.5 * abs(max_shear) / geom.A
         else:
-            catalog_data = catalog[catalog['id'] == spec.catalog_id].iloc[0]
+            catalog_data = MATERIAL_CATALOG[MATERIAL_CATALOG['id'] == spec.catalog_id].iloc[0]
             web_area = (spec.height - 2*catalog_data['flange_thickness']) * catalog_data['web_thickness']
             shear_stress = abs(max_shear) / web_area
         
@@ -826,67 +762,53 @@ if __name__ == '__main__':
     params = pd.read_csv('data/design_parameters.csv').iloc[0].to_dict()
     INPUT_PARAMS = DesignParameters(**params)
     MATERIAL_STRENGTHS = pd.read_csv('data/material_strengths.csv').set_index('material').to_dict(orient='index')
-    BEAM_CATALOG = pd.read_csv('data/material_catalog.csv')
-    BEAM_CATALOG['id'] = (BEAM_CATALOG['material'] + BEAM_CATALOG['base'].astype(str) + 'x' + BEAM_CATALOG['height'].astype(str))
+    MATERIAL_CATALOG = pd.read_csv('data/material_catalog.csv')
     
     results = run_bayesian_optimization(
-        catalog=BEAM_CATALOG,
         design_params=INPUT_PARAMS,
         material_strengths=MATERIAL_STRENGTHS,
         n_calls=100,
         n_initial_points=20,
-        objective_weights={'cost': 0.5, 'deflection': 0.3, 'volume': 0.2},
+        objective_weights={'cost': 0.5, 'deflection': 0.3},
         max_deflection_limit=10.0,
-        random_state=42
     )
     
     best_metrics = evaluate_configuration(
         results['best_params'],
-        BEAM_CATALOG,
+        MATERIAL_CATALOG,
         INPUT_PARAMS,
         MATERIAL_STRENGTHS
     )
     
-    print("\n" + "="*70)
-    print("DETAILED EVALUATION OF BEST CONFIGURATION")
-    print("="*70)
     print(f"Total cost: ${best_metrics['total_cost']:.2f}")
     print(f"Total volume: {best_metrics['total_volume_m3']:.4f} m³")
     print(f"Max deflection: {best_metrics['max_deflection_mm']:.3f} mm")
     print(f"Max stress ratio: {best_metrics['max_stress_ratio']:.3f}")
     print(f"Passes all checks: {best_metrics['passes_all_checks']}")
     
-    # Save results
     results_df = pd.DataFrame([results['best_params']])
     results_df['best_objective'] = results['best_objective_value']
     results_df.to_csv('optimization_results.csv', index=False)
-    print("\nResults saved to 'optimization_results.csv'")
 
 
 
-# if __name__ == '__main__':
+if __name__ == '__main__':
 
-#     # Units are mm, N, and MPa (N/mm²)
-#     params = pd.read_csv('data/design_parameters.csv').iloc[0].to_dict()
-#     INPUT_PARAMS = DesignParameters(**params)
-#     MATERIAL_STRENGTHS = pd.read_csv('data/material_strengths.csv').set_index('material').to_dict(orient='index')
-#     BEAM_CATALOG = pd.read_csv('data/material_catalog.csv')
+    east_joists = MemberSpec('c24_60x120', quantity=1, padding=0)
+    tail_joists = MemberSpec('c24_60x120', quantity=1, padding=0)
+    west_joists = MemberSpec('c24_60x120', quantity=1, padding=0)
+    trimmers = MemberSpec('c24_80x160', quantity=2)
+    header = MemberSpec('c24_60x120', quantity=1)
+    planks = MemberSpec('c14_200x25')
 
-#     east_joists = MemberSpec('wood60x120', quantity=1, padding=0)
-#     tail_joists = MemberSpec('wood60x120', quantity=1, padding=0)
-#     west_joists = MemberSpec('wood60x120', quantity=1, padding=0)
-#     trimmers = MemberSpec('wood80x160', quantity=2)
-#     header = MemberSpec('wood60x120', quantity=1)
-#     planks = MemberSpec('wood200x18')
-
-#     frame = create_model(
-#         east_joists=east_joists,
-#         west_joists=west_joists,
-#         tail_joists=tail_joists,
-#         trimmers=trimmers,
-#         header=header,
-#         planks=planks,
-#         walls=True
-#     )
-#     frame.analyze(check_statics=True)
-#     # render(frame, deformed_scale=100, opacity=0.25)
+    frame, nodes, members, total_cost = create_model(
+        east_joists=east_joists,
+        west_joists=west_joists,
+        tail_joists=tail_joists,
+        trimmers=trimmers,
+        header=header,
+        planks=planks,
+        walls=True
+    )
+    frame.analyze(check_statics=True)
+    render(frame, deformed_scale=100, opacity=0.25)

@@ -40,12 +40,23 @@ class DesignParameters:
     def opening_z(self):
         return self.beam_length - self.opening_width - self.wall_beam_contact_depth/2
     
-# Units are mm, N, and MPa (N/mm²)
-INPUT_PARAMS = pd.read_csv('data/design_parameters.csv').iloc[0].to_dict()
-INPUT_PARAMS = DesignParameters(**INPUT_PARAMS)
-MATERIAL_STRENGTHS = pd.read_csv('data/material_strengths.csv').set_index('material').to_dict(orient='index')
-MATERIAL_CATALOG = pd.read_csv('data/material_catalog.csv')
-MATERIAL_CATALOG['id'] = (MATERIAL_CATALOG['material'] + '_' + MATERIAL_CATALOG['base'].astype(str) + 'x' + MATERIAL_CATALOG['height'].astype(str))
+def prep_data():
+    # Units are mm, N, and MPa (N/mm²)
+    input_params = pd.read_csv('data/design_parameters.csv').iloc[0].to_dict()
+    input_params = DesignParameters(**input_params)
+
+    material_str = pd.read_csv('data/material_strengths.csv').set_index('material').to_dict(orient='index')
+
+    material_catalog = pd.read_csv('data/material_catalog.csv')
+    material_catalog['id'] = (material_catalog['material'] + '_' + material_catalog['base'].astype(str) + 'x' + material_catalog['height'].astype(str))
+    doubled_beams = material_catalog[(material_catalog['type'] == 'beam') & (material_catalog['material'] == 'c24')].copy()
+    doubled_beams['base'] = doubled_beams['base'] * 2
+    doubled_beams['type'] = 'double'
+    doubled_beams['source'] = doubled_beams['id']
+    material_catalog = pd.concat([material_catalog, doubled_beams], ignore_index=True)
+    material_catalog['id'] = (material_catalog['material'] + '_' + material_catalog['base'].astype(str) + 'x' + material_catalog['height'].astype(str))
+
+    return input_params, material_str, material_catalog
 
 @dataclass
 class CrossSectionProperties:
@@ -91,6 +102,7 @@ class MemberSpec:
     def __post_init__(self):
         self._catalog_data = MATERIAL_CATALOG[MATERIAL_CATALOG['id'] == self.material_id].iloc[0]
         self.material = self._catalog_data['material']
+        self.type = self._catalog_data['type']
         self.base = self._catalog_data['base']
         self.height = self._catalog_data['height']
         self.length = self._catalog_data['length']
@@ -388,7 +400,15 @@ def calculate_purchase_quantity(frame, members):
     materials = defaultdict(list)
     for member in members:
         pynite_member = frame.members[member.name]
-        materials[member.spec.material_id].append(float(pynite_member.L()))
+        member_length = float(pynite_member.L())
+
+        if member.spec.type == 'double':
+            source_id = MATERIAL_CATALOG[MATERIAL_CATALOG['id'] == member.spec.material_id].iloc[0]['source']
+            materials[source_id].extend([member_length] * 2)
+        else:
+            material_id = member.spec.material_id
+            materials[source_id].extend([member_length])
+
 
     total_cost = 0.0
     all_material_cuts = {}
@@ -744,10 +764,7 @@ def run_bayesian_optimization(
 
 # if __name__ == '__main__':
 #     # Units are mm, N, and MPa (N/mm²)
-#     params = pd.read_csv('data/design_parameters.csv').iloc[0].to_dict()
-#     INPUT_PARAMS = DesignParameters(**params)
-#     MATERIAL_STRENGTHS = pd.read_csv('data/material_strengths.csv').set_index('material').to_dict(orient='index')
-#     MATERIAL_CATALOG = pd.read_csv('data/material_catalog.csv')
+#     # INPUT_PARAMS, MATERIAL_STRENGTHS, MATERIAL_CATALOG = prep_data()
     
 #     results = run_bayesian_optimization(
 #         design_params=INPUT_PARAMS,
@@ -778,6 +795,8 @@ def run_bayesian_optimization(
 
 
 if __name__ == '__main__':
+
+    INPUT_PARAMS, MATERIAL_STRENGTHS, MATERIAL_CATALOG = prep_data()
 
     east_joists = MemberSpec('c24_60x120', quantity=1, padding=0)
     tail_joists = MemberSpec('c24_60x120', quantity=1, padding=0)

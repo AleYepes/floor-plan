@@ -1,9 +1,10 @@
-# floor-plan
-Script to calculate forces for new floor in my basement
+# Designing a floor
+Script to calculate loads and statics for a new floor in my basement
+- Explores design parameters with bayesian optimization to find the most cost-efficient design
 
-# Requirements
+### Requirements
 
-## Install nbstripout to Remove Unnecessary Metadata and Use nbdime for Better Diffs and Merging
+#### Install nbstripout to Remove Unnecessary Metadata and Use nbdime for Better Diffs and Merging
 ```
 pip install nbstripout nbdime
 nbstripout --install

@@ -384,7 +384,7 @@ def apply_loads(frame: FEModel3D, members: List[Member]) -> None:
         geom = member.spec.get_geometry()
         material = MATERIAL_STRENGTHS[member.spec.material]
         dead_load = -geom.A * material['rho']
-        frame.add_member_dist_load(member.name, 'FY', dead_load, dead_load)
+        frame.add_member_dist_load(member.name, 'FY', dead_load, dead_load, case=DL_COMBO)
 
         if member.name.startswith('tail'):
             header = next((m for m in members if m.name.startswith('header')))
@@ -393,8 +393,8 @@ def apply_loads(frame: FEModel3D, members: List[Member]) -> None:
         elif member.name.startswith('header'):
             trimmer = next((m for m in members if m.name.startswith('trimmer')))
             connector = _find_compatible_connector(base=member.spec.base, height=trimmer.spec.height)
-            frame.add_member_pt_load(member.name, 'FY', -connector['weight_N'], 0)
-            frame.add_member_pt_load(member.name, 'FY', -connector['weight_N'], frame.members[member.name].L())
+            frame.add_member_pt_load(member.name, 'FY', -connector['weight_N'], 0, case=DL_COMBO)
+            frame.add_member_pt_load(member.name, 'FY', -connector['weight_N'], frame.members[member.name].L(), case=DL_COMBO)
 
     # Live loads
     plank_members = [m for m in members if m.name.startswith('p')]
@@ -422,7 +422,7 @@ def apply_loads(frame: FEModel3D, members: List[Member]) -> None:
             tributary_width = standard_spacing
         
         live_load = -INPUT_PARAMS.live_load_mpa * tributary_width
-        frame.add_member_dist_load(member.name, 'FY', live_load, live_load)
+        frame.add_member_dist_load(member.name, 'FY', live_load, live_load, case=LL_COMBO)
 
 
 def create_model(
@@ -503,124 +503,115 @@ def calculate_purchase_quantity(frame: FEModel3D, members: List[Member]):
     return total_cost, all_material_cuts
 
 
-def evaluate_stresses(frame: FEModel3D, members: List[Member]) -> List[Dict]:
-    frame.analyze()
-    support_node_names = {n.name for n in nodes if n.name.endswith('_N') or n.name.endswith('_S')}
+# def evaluate_stresses(frame: FEModel3D, members: List[Member]) -> List[Dict]:
+#     frame.analyze()
+#     support_node_names = {n.name for n in nodes if n.name.endswith('_N') or n.name.endswith('_S')}
+#     evaluations = []
+#     for member in members:
+#         pynite_member = frame.members[member.name]
+#         geom = member.spec.get_geometry()
+#         mat_props = MATERIAL_STRENGTHS[member.spec.material]
+#         ratios = {}
 
-    evaluations = []
-    ratios = {}
-    for member in members:
-        pynite_member = frame.members[member.name]
-        geom = member.spec.get_geometry()
-        mat_props = MATERIAL_STRENGTHS[member.spec.material]
+#         # Deflection
+#         deflection = abs(pynite_member.min_deflection('dy', 'Combo 1'))
+#         ratios['deflection'] = deflection / (pynite_member.L() / 360)
 
-        # Deflection
-        deflection = abs(pynite_member.min_deflection('dy', 'Combo 1'))
-        ratios['deflection'] = deflection / (pynite_member.L() / 360)
+#         # Bending Stress
+#         max_moment = max(abs(pynite_member.max_moment('Mz', 'Combo 1')), abs(pynite_member.min_moment('Mz', 'Combo 1')))
+#         bending_stress = (max_moment * (member.spec.height / 2) / geom.Iz)
+#         ratios['bending'] = bending_stress / mat_props['f_mk']
 
-        # Bending Stress
-        max_moment = max(abs(pynite_member.max_moment('Mz', 'Combo 1')), abs(pynite_member.min_moment('Mz', 'Combo 1')))
-        bending_stress = (max_moment * (member.spec.height / 2) / geom.Iz)
-        ratios['bending'] = bending_stress / mat_props['f_mk']
+#         # Shear Stress
+#         max_shear = max(abs(pynite_member.max_shear('Fy', 'Combo 1')), abs(pynite_member.min_shear('Fy', 'Combo 1')))
+#         if member.spec.shape == 'rectangular':
+#             shear_stress = 1.5 * abs(max_shear) / geom.A
+#         else:
+#             catalog_data = member.spec._catalog_data
+#             web_height = member.spec.height - 2 * catalog_data['flange_thickness']
+#             web_thickness = catalog_data['web_thickness']
+#             web_area = web_height * web_thickness
+#             shear_stress = abs(max_shear) / web_area
+#         ratios['shear'] = shear_stress / mat_props['f_vk']
 
-        # Shear Stress
-        max_shear = max(abs(pynite_member.max_shear('Fy', 'Combo 1')), abs(pynite_member.min_shear('Fy', 'Combo 1')))
-        if member.spec.shape == 'rectangular':
-            shear_stress = 1.5 * abs(max_shear) / geom.A
-        else:
-            catalog_data = member.spec._catalog_data
-            web_height = member.spec.height - 2 * catalog_data['flange_thickness']
-            web_thickness = catalog_data['web_thickness']
-            web_area = web_height * web_thickness
-            shear_stress = abs(max_shear) / web_area
-        ratios['shear'] = shear_stress / mat_props['f_vk']
+#         # Axial Stress
+#         max_axial = max(abs(pynite_member.max_axial('Combo 1')), abs(pynite_member.min_axial('Combo 1')))
+#         axial_stress = max_axial / geom.A
+#         ratios['axial'] = axial_stress / mat_props['f_c90k']
 
-        # Axial Stress
-        max_axial = max(abs(pynite_member.max_axial('Combo 1')), abs(pynite_member.min_axial('Combo 1')))
-        axial_stress = max_axial / geom.A
-        ratios['axial'] = axial_stress / mat_props['f_c90k']
+#         # Torsion Stress
+#         max_torsion = max(abs(pynite_member.max_torque('Combo 1')), abs(pynite_member.min_torque('Combo 1')))
+#         torsion_stress = max_torsion * (member.spec.height / 2) / geom.J
+#         ratios['torsion'] = torsion_stress / mat_props['f_mk']
 
-        # Torsion Stress
-        max_torsion = max(abs(pynite_member.max_torque('Combo 1')), abs(pynite_member.min_torque('Combo 1')))
-        torsion_stress = max_torsion * (member.spec.height / 2) / geom.J
-        ratios['torsion'] = torsion_stress / mat_props['f_mk']
-
-        # Bearing/Crushing on walls
-        bearing_area = member.spec.base * INPUT_PARAMS.wall_beam_contact_depth
-        if member.node_i in support_node_names:
-            reaction_force = abs(pynite_member.F('Fy', 0, 'Combo 1'))
-            bearing_stress = reaction_force / bearing_area
+#         # Bearing/Crushing on walls
+#         bearing_area = member.spec.base * INPUT_PARAMS.wall_beam_contact_depth
+#         if member.node_i in support_node_names:
+#             reaction_force = abs(pynite_member.F('Fy', 0, 'Combo 1'))
+#             bearing_stress = reaction_force / bearing_area
                         
-            ratios['wood_contact_i'] = bearing_stress / MATERIAL_STRENGTHS[member.spec.material]['f_c90k']
-            ratios['brick_contact_i'] = bearing_stress / MATERIAL_STRENGTHS['brick']['f_c0k']
+#             ratios['wood_contact_i'] = bearing_stress / MATERIAL_STRENGTHS[member.spec.material]['f_c90k']
+#             ratios['brick_contact_i'] = bearing_stress / MATERIAL_STRENGTHS['brick']['f_c0k']
 
-        if member.node_j in support_node_names:
-            reaction_force = abs(pynite_member.F('Fy', pynite_member.L(), 'Combo 1'))
-            bearing_stress = reaction_force / bearing_area
+#         if member.node_j in support_node_names:
+#             reaction_force = abs(pynite_member.F('Fy', pynite_member.L(), 'Combo 1'))
+#             bearing_stress = reaction_force / bearing_area
             
-            ratios['wood_contact_j'] = bearing_stress / MATERIAL_STRENGTHS[member.spec.material]['f_c90k']
-            ratios['brick_contact_j'] = bearing_stress / MATERIAL_STRENGTHS['brick']['f_c0k']
+#             ratios['wood_contact_j'] = bearing_stress / MATERIAL_STRENGTHS[member.spec.material]['f_c90k']
+#             ratios['brick_contact_j'] = bearing_stress / MATERIAL_STRENGTHS['brick']['f_c0k']
 
-        # Combined Stresses
-        passes_strength = all(r <= 1 for r in ratios.values())
-        grade = ratios.values().sum()
+#         # Combined Stresses
+#         passes_strength = all(r <= 1 for r in ratios.values())
+#         grade = ratios.values().sum()
 
-        evaluations.append({
-            'member_name': member.name,
-            'material_id': member.spec.material_id,
-            'member_passes': passes_strength,
-            'member_grade': grade,
-        })
+#         evaluations.append({
+#             'member_name': member.name,
+#             'material_id': member.spec.material_id,
+#             'member_passes': passes_strength,
+#             'member_grade': grade,
+#         })
 
-    return evaluations
+#     return evaluations
 
 
-def evaluate_stresses(frame: FEModel3D, members: List[Member], creep_factor_for_wood: float = 1.6, buckling_K: float = 1.0):
-    """
-    Evaluate members for bending, shear, axial, torsion, bearing, and simplified buckling / combined checks.
-
-    Returns a list of dicts with:
-      - member_name
-      - material_id
-      - checks (detailed ratio dict)
-      - member_utilization (single scalar; >1 means fail)
-      - member_passes (bool)
-    """
-    frame.analyze()
+def evaluate_stresses(frame: FEModel3D, members: List[Member], buckling_K: float = 1.0):
 
     def _r_radius_of_gyration(I, A):
         return (I / A) ** 0.5 if A > 0 else 1e-9
 
-    results = []
-
-    # names of nodes considered supports (for bearing)
+    frame.add_load_combo('ULS_Strength', {'DL': 1.35, 'LL': 1.5})
+    frame.analyze()
     support_node_names = {n.name for n in frame.nodes.values() if n.name.endswith('_N') or n.name.endswith('_S')}
+    results = []
     for member in members:
         pynite_member = frame.members[member.name]
         L = float(pynite_member.L())
         geom = member.spec.get_geometry()
         mat_props = MATERIAL_STRENGTHS[member.spec.material]
-
         ratios = {}
 
         # Deflection (serviceability)
-        # instantaneous vertical deflection (dy). use L/360 as limit like you had.
-        deflection = abs(pynite_member.min_deflection('dy', 'Combo 1'))
-        # if timber, apply creep (long-term) factor to produce design deflection
-        if member.spec.material.lower() in ['c14', 'c18', 'c24', 'osb']:  # adjust names to match your catalog keys
-            deflection_design = deflection * creep_factor_for_wood
+        deflection_dl = abs(pynite_member.min_deflection('dy', 'DL'))
+        deflection_ll = abs(pynite_member.min_deflection('dy', 'LL'))
+        if member.spec.material_id.startswith('c'):
+            deflection_factor = 1.8
+        elif member.spec.material_id.startswith('osb'):
+            deflection_factor = 2.5
         else:
-            deflection_design = deflection
-        ratios['deflection_ratio'] = deflection_design / (L / 360)
+            deflection_factor = 1.0
+
+        quasi_permanent_factor = 0.8
+        deflection = (deflection_dl * deflection_factor) + (deflection_ll * deflection_factor * quasi_permanent_factor)
+        ratios['deflection_ratio'] = deflection / (L / 360)
 
         # Bending stress (normal due to Mz)
-        max_Mz = max(abs(pynite_member.max_moment('Mz', 'Combo 1')), abs(pynite_member.min_moment('Mz', 'Combo 1')))
+        max_Mz = max(abs(pynite_member.max_moment('Mz', 'ULS_Strength')), abs(pynite_member.min_moment('Mz', 'ULS_Strength')))
         # bending normal stress at extreme fiber (use half height)
         sigma_bending = (max_Mz * (member.spec.height / 2.0)) / geom.Iz
         ratios['bending_ratio'] = abs(sigma_bending) / mat_props['f_mk'] if mat_props['f_mk'] > 0 else 0.0
 
         # Shear stress
-        max_shear = max(abs(pynite_member.max_shear('Fy', 'Combo 1')), abs(pynite_member.min_shear('Fy', 'Combo 1')))
+        max_shear = max(abs(pynite_member.max_shear('Fy', 'ULS_Strength')), abs(pynite_member.min_shear('Fy', 'ULS_Strength')))
         if member.spec.shape == 'rectangular':
             shear_stress = 1.5 * (max_shear) / geom.A
         else:
@@ -632,9 +623,9 @@ def evaluate_stresses(frame: FEModel3D, members: List[Member], creep_factor_for_
         ratios['shear_ratio'] = abs(shear_stress) / mat_props['f_vk'] if mat_props['f_vk'] > 0 else 0.0
 
         # Axial stress
-        max_axial = max(abs(pynite_member.max_axial('Combo 1')), abs(pynite_member.min_axial('Combo 1')))
+        max_axial = max(abs(pynite_member.max_axial('ULS_Strength')), abs(pynite_member.min_axial('ULS_Strength')))
         # note: min/max_axial returns sign; we'll use sign for buckling direction if compressive
-        axial_pos = max([pynite_member.max_axial('Combo 1'), pynite_member.min_axial('Combo 1')], key=abs)
+        axial_pos = max([pynite_member.max_axial('ULS_Strength'), pynite_member.min_axial('ULS_Strength')], key=abs)
         axial_stress = axial_pos / geom.A if geom.A > 0 else 0.0
         # compare axial stress with appropriate axial capacity. for wood use f_c90k, steel use f_mk (or f_yield)
         # but f_c90k is compression across grain; for along-grain compression different property may be needed.
@@ -648,7 +639,7 @@ def evaluate_stresses(frame: FEModel3D, members: List[Member], creep_factor_for_
         ratios['axial_ratio'] = abs(axial_stress) / axial_capacity if axial_capacity > 0 else 0.0
 
         # Torsion stress
-        max_torque = max(abs(pynite_member.max_torque('Combo 1')), abs(pynite_member.min_torque('Combo 1')))
+        max_torque = max(abs(pynite_member.max_torque('ULS_Strength')), abs(pynite_member.min_torque('ULS_Strength')))
         torsion_stress = max_torque * (member.spec.height / 2.0) / geom.J if geom.J > 0 else 0.0
         # compare torsion to bending strength for timber or to f_mk for steel (conservative)
         ratios['torsion_ratio'] = abs(torsion_stress) / mat_props['f_mk'] if mat_props['f_mk'] > 0 else 0.0
@@ -657,12 +648,12 @@ def evaluate_stresses(frame: FEModel3D, members: List[Member], creep_factor_for_
         bearing_checks = {}
         bearing_area = member.spec.base * INPUT_PARAMS.wall_beam_contact_depth
         if member.node_i in support_node_names:
-            reaction_force_i = abs(pynite_member.F('Fy', 0, 'Combo 1'))
+            reaction_force_i = abs(pynite_member.shear('Fy', 0, 'ULS_Strength'))
             bearing_stress_i = reaction_force_i / bearing_area if bearing_area > 0 else 0.0
             bearing_checks['wood_contact_i'] = bearing_stress_i / MATERIAL_STRENGTHS[member.spec.material]['f_c90k'] if MATERIAL_STRENGTHS[member.spec.material]['f_c90k'] > 0 else 0.0
             bearing_checks['brick_contact_i'] = bearing_stress_i / MATERIAL_STRENGTHS['brick']['f_c0k'] if MATERIAL_STRENGTHS['brick']['f_c0k'] > 0 else 0.0
         if member.node_j in support_node_names:
-            reaction_force_j = abs(pynite_member.F('Fy', pynite_member.L(), 'Combo 1'))
+            reaction_force_j = abs(pynite_member.shear('Fy', pynite_member.L(), 'ULS_Strength'))
             bearing_stress_j = reaction_force_j / bearing_area if bearing_area > 0 else 0.0
             bearing_checks['wood_contact_j'] = bearing_stress_j / MATERIAL_STRENGTHS[member.spec.material]['f_c90k'] if MATERIAL_STRENGTHS[member.spec.material]['f_c90k'] > 0 else 0.0
             bearing_checks['brick_contact_j'] = bearing_stress_j / MATERIAL_STRENGTHS['brick']['f_c0k'] if MATERIAL_STRENGTHS['brick']['f_c0k'] > 0 else 0.0
@@ -750,6 +741,7 @@ def render(frame, deformed_scale=100, opacity=0.25) -> None:
                 actor.prop.opacity = opacity
 
     rndr = Renderer(frame)
+    rndr.combo_name = 'ULS_Strength'
     rndr.annotation_size = 5
     rndr.render_loads = False
     rndr.deformed_shape = True
@@ -768,6 +760,9 @@ if __name__ == '__main__':
     trimmers = MemberSpec('c24_80x160', quantity=2)
     header = MemberSpec('c24_60x120', quantity=1)
     planks = MemberSpec('c18_200x25')
+
+    DL_COMBO = 'DL'
+    LL_COMBO = 'LL'
 
     frame, nodes, members = create_model(
         east_joists=east_joists,

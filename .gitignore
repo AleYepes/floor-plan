@@ -17,9 +17,9 @@ Thumbs.db
 
 # Data and configuration files and directories
 metadata/
-data/
+# data/
 prospects/
-*data.*
+# *data.*
 bin/
 include/
 old/

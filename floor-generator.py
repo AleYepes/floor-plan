@@ -12,6 +12,7 @@ from skopt.space import Integer, Categorical
 from skopt.utils import use_named_args
 import warnings
 import bisect
+import math
 
 from sklearn.linear_model import LinearRegression
 from sklearn.linear_model import HuberRegressor
@@ -50,7 +51,11 @@ def prep_data():
     input_params = DesignParameters(**input_params)
 
     # MATERIAL STRENGTH
-    material_str = pd.read_csv('data/material_strengths.csv').set_index('material').to_dict(orient='index')
+    material_str = pd.read_csv('data/material_strengths.csv')
+    material_str['G_05'] = material_str['G'] * 5/6
+    material_str['E_05'] = material_str['E_0'] * 2/3
+    material_str = material_str.set_index('material').to_dict(orient='index')
+
 
     # CONNECTORS
     connectors = pd.read_csv('data/connectors.csv')
@@ -503,278 +508,214 @@ def calculate_purchase_quantity(frame: FEModel3D, members: List[Member]):
     return total_cost, all_material_cuts
 
 
+def calc_bending_moment_capacity(spec, geometry, material_props: Dict[str, float], member_length, k_mod: float, gamma_M: float):
+
+    f_m_d = (material_props['f_mk'] * k_mod) / gamma_M
+    section_modulus_W = geometry.Iy / (spec.height / 2)
+    effective_length = member_length * 0.9
+
+    critical_bending_stress = (0.78 * spec.base**2 / (spec.height * effective_length)) * material_props['E_05']
+    print(critical_bending_stress)
+    critical_bending_moment_strong_axis = math.pi * math.sqrt(material_props['E_05'] * geometry.Iz * material_props['G_05'] * geometry.J)
+    critical_bending_stress = critical_bending_moment_strong_axis / (section_modulus_W * effective_length)
+    print(critical_bending_stress)
+    print()
+    relative_slenderness_ratio = math.sqrt(material_props['f_mk'] / critical_bending_stress)
+
+    if relative_slenderness_ratio <= 0.75:
+        lateral_buckling_factor_k_crit = 1.0
+    elif relative_slenderness_ratio <= 1.4:
+        lateral_buckling_factor_k_crit = 1.56 - 0.75 * relative_slenderness_ratio
+    else:
+        lateral_buckling_factor_k_crit = 1 / relative_slenderness_ratio ** 2
+
+    bending_moment_capacity = f_m_d * section_modulus_W * lateral_buckling_factor_k_crit
+
+    return bending_moment_capacity
+
+
 def evaluate_stresses(frame: FEModel3D, members: List[Member]):
-    frame.add_load_combo('ULS_Strength', {'DL': 1.35, 'LL': 1.5})
-    frame.analyze()
-    support_node_names = {n.name for n in frame.nodes.values() if n.name.endswith('_N') or n.name.endswith('_S')}
-    results = []
-    for member in members:
-        pynite_member = frame.members[member.name]
-        L = float(pynite_member.L())
-        geom = member.spec.get_geometry()
-        mat_props = MATERIAL_STRENGTHS[member.spec.material]
-        ratios = {}
-
-        # Deflection
-        deflection_dl = abs(pynite_member.min_deflection('dy', 'DL'))
-        deflection_ll = abs(pynite_member.min_deflection('dy', 'LL'))
-        if member.spec.material_id.startswith('c'):
-            deflection_factor = 1.8
-        elif member.spec.material_id.startswith('osb'):
-            deflection_factor = 2.5
-        else:
-            deflection_factor = 1.0
-
-        quasi_permanent_factor = 0.8
-        deflection = (deflection_dl * deflection_factor) + (deflection_ll * deflection_factor * quasi_permanent_factor)
-        ratios['deflection_ratio'] = deflection / (L / 360)
-
-        # Bending stress
-        max_Mz = max(abs(pynite_member.max_moment('Mz', 'ULS_Strength')), abs(pynite_member.min_moment('Mz', 'ULS_Strength')))
-        sigma_bending = (max_Mz * (member.spec.height / 2.0)) / geom.Iz
-        ratios['bending_ratio'] = abs(sigma_bending) / mat_props['f_mk']
-
-        # Shear stress
-        max_shear = max(abs(pynite_member.max_shear('Fy', 'ULS_Strength')), abs(pynite_member.min_shear('Fy', 'ULS_Strength')))
-        if member.spec.shape == 'rectangular':
-            shear_stress = 1.5 * (max_shear) / geom.A
-        else:
-            catalog_data = member.spec._catalog_data
-            web_height = member.spec.height - 2 * catalog_data.get('flange_thickness', 0)
-            web_thickness = catalog_data.get('web_thickness', 1e-6)
-            web_area = web_height * web_thickness
-            shear_stress = max_shear / web_area
-        ratios['shear_ratio'] = abs(shear_stress) / mat_props['f_vk']
-
-        # Axial stress
-        axial_pos = max([pynite_member.max_axial('ULS_Strength'), pynite_member.min_axial('ULS_Strength')], key=abs)
-        axial_stress = axial_pos / geom.A
-        if axial_pos < 0:
-            axial_capacity_key = 'f_c0k'
-        else:
-            axial_capacity_key = 'f_mk' if member.spec.material.startswith('s') else 'f_t0k'
-        axial_capacity = mat_props.get(axial_capacity_key, mat_props.get('f_mk', 1e-9))
-        ratios['axial_ratio'] = abs(axial_stress) / axial_capacity
-
-        # Torsion stress
-        max_torque = max(abs(pynite_member.max_torque('ULS_Strength')), abs(pynite_member.min_torque('ULS_Strength')))
-        torsion_stress = max_torque * (member.spec.height / 2.0) / geom.J
-        ratios['torsion_ratio'] = abs(torsion_stress) / mat_props['f_mk']
-
-        # Bearing where supported
-        bearing_checks = {}
-        bearing_area = member.spec.base * INPUT_PARAMS.wall_beam_contact_depth
-        if member.node_i in support_node_names:
-            reaction_force_i = abs(pynite_member.shear('Fy', 0, 'ULS_Strength'))
-            bearing_stress_i = reaction_force_i / bearing_area
-            bearing_checks['wood_contact_i'] = bearing_stress_i / MATERIAL_STRENGTHS[member.spec.material]['f_c90k']
-            bearing_checks['brick_contact_i'] = bearing_stress_i / MATERIAL_STRENGTHS['brick']['f_c0k']
-        if member.node_j in support_node_names:
-            reaction_force_j = abs(pynite_member.shear('Fy', pynite_member.L(), 'ULS_Strength'))
-            bearing_stress_j = reaction_force_j / bearing_area
-            bearing_checks['wood_contact_j'] = bearing_stress_j / MATERIAL_STRENGTHS[member.spec.material]['f_c90k']
-            bearing_checks['brick_contact_j'] = bearing_stress_j / MATERIAL_STRENGTHS['brick']['f_c0k']
-
-        ratios.update(bearing_checks)
-
-        # Buckling (Euler) for compression
-        buckling_K = 1.0
-        buckling_ratio = 0.0
-        if axial_pos < 0:  # compression (sign convention: negative compressive)
-            r_y = (geom.Iy / geom.A) ** 0.5
-            r_z = (geom.Iz / geom.A) ** 0.5
-            r_min = min(r_y, r_z)
-            I_for_Pcr = geom.Iy if r_min == r_y else geom.Iz
-            Pcr = (np.pi ** 2) * mat_props['E_0'] * I_for_Pcr / (buckling_K * L) ** 2
-            P_act = abs(axial_pos)
-            if Pcr > 0:
-                buckling_ratio = P_act / Pcr
-            else:
-                buckling_ratio = 1e6
-        ratios['buckling_ratio'] = buckling_ratio
-
-        # Combined failure check
-        mat_name = member.spec.material.lower()
-        if mat_name.startswith('s'):
-            # combine axial + bending into a normal stress, then von Mises including shear/torsion
-            sigma_normal = axial_stress + sigma_bending 
-            tau_equiv = max(abs(shear_stress), abs(torsion_stress))
-            sigma_vm = (sigma_normal ** 2 + 3.0 * (tau_equiv ** 2)) ** 0.5
-            fy = mat_props['f_mk'] if mat_props['f_mk'] > 0 else 1e-9
-            member_utilization = sigma_vm / fy
-            member_utilization = max(member_utilization, ratios['shear_ratio'], ratios['deflection_ratio'], ratios['buckling_ratio'])
-
-        else:
-            # Timber / OSB / brittle-like: use quadratic interaction of normalized components
-            interaction = ratios['bending_ratio']**2 + ratios['shear_ratio']**2 + ratios['axial_ratio']**2 + ratios['torsion_ratio']**2
-            member_utilization = max(interaction ** 0.5, ratios['deflection_ratio'], ratios['buckling_ratio'])
-
-        results.append({
-            'member_name': member.name,
-            'material_id': member.spec.material_id,
-            'ratios': ratios,
-            'member_utilization': float(member_utilization),
-        })
-
-    return results
-
-
-def evaluate_stresses(frame: FEModel3D, members: List[Member], buckling_K: float = 1.0):
+    # Using equations and values detailed in https://www.swedishwood.com/siteassets/5-publikationer/pdfer/sw-design-of-timber-structures-vol2-2022.pdf
 
     def _get_eurocode_factors(material_name: str):
-        if material_name.startswith('s'):
-            return {'gamma_M': 1.0, 'k_mod': 1.0, 'k_def': 0.0, 'k_cr': 1.0, 'k_c90': 1.0, 'material_type': 'steel'}
-        elif material_name.startswith('osb'):
-             return {'gamma_M': 1.2, 'k_mod': 0.7, 'k_def': 2.25, 'k_cr': 1.0, 'k_c90': 1.0, 'material_type': 'wood'}
-        elif material_name.startswith('c'):
-            return {'gamma_M': 1.3, 'k_mod': 0.8, 'k_def': 0.6, 'k_cr': 0.67, 'k_c90': 1.5, 'material_type': 'wood'}
+        # Service class 1
+        if material_name.startswith('c'): # Timber
+            return {'gamma_M': 1.3, 'k_mod': 0.7, 'k_def': 1.5, 'k_cr': 0.67, 'beta_c': 0.2, 'material_type': 'wood'}
+        elif material_name.startswith('osb'): # OSB
+            return {'gamma_M': 1.2, 'k_mod': 0.5, 'k_def': 0.6, 'k_cr': 1, 'beta_c': 0.1, 'material_type': 'wood'}
+        elif material_name.startswith('p'): # Plywood
+            return {'gamma_M': 1.3, 'k_mod': 0.45, 'k_def': 0.7, 'k_cr': 1, 'beta_c': 0.1, 'material_type': 'wood'}
+        elif material_name.startswith('s'): # Steel
+            return {'gamma_M': 1.0, 'material_type': 'steel'}
         elif material_name == 'brick':
-             return {'gamma_M': 2.5, 'k_mod': 1.0, 'k_def': 0.0, 'k_cr': 1.0, 'k_c90': 1.0, 'material_type': 'masonry'}
+            return {'gamma_M': 2.5, 'material_type': 'masonry'}
         else:
-            return {'gamma_M': 1.0, 'k_mod': 1.0, 'k_def': 0.0, 'k_cr': 1.0, 'k_c90': 1.0, 'material_type': 'generic'}
+            return {'gamma_M': 1.0, 'material_type': 'generic'}
 
-    frame.add_load_combo('ULS_Strength', {'DL': 1.35, 'LL': 1.5})
-    frame.analyze()
-    support_node_names = {n.name for n in frame.nodes.values() if n.name.endswith('_N') or n.name.endswith('_S')}
-    results = []
+    ULS_COMBO = 'ULS_Strength'
+    frame.add_load_combo(ULS_COMBO, {'DL': 1.35, 'LL': 1.5})
+    frame.analyze(check_stability=False)
+
+    psi_2_storage = 0.8  # Quasi-permanent factor for storage areas (Category E)
+    buckling_K = 1.0
+    deflection_limit_factor = 300
+    support_node_names = {node.name for node in frame.nodes.values() if node.name.endswith(('_N', '_S'))}
     
+    evaluation_results = []
+
     for member in members:
         pynite_member = frame.members[member.name]
-        L = float(pynite_member.L())
-        geom = member.spec.get_geometry()
-        mat_props = MATERIAL_STRENGTHS[member.spec.material]
-        factors = _get_eurocode_factors(member.spec.material)
+        spec = member.spec
+        geometry = spec.get_geometry()
+        material_props = MATERIAL_STRENGTHS[spec.material]
+        factors = _get_eurocode_factors(spec.material)
         
-        # Design strengths
-        gamma_M = factors['gamma_M']
-        k_mod = factors['k_mod']
-        
-        f_md = (mat_props['f_mk'] * k_mod) / gamma_M
-        f_vd = (mat_props['f_vk'] * k_mod) / gamma_M
-        f_c0d = (mat_props.get('f_c0k', 0) * k_mod) / gamma_M
-        f_t0d = (mat_props.get('f_t0k', 0) * k_mod) / gamma_M
-        f_c90d = (mat_props.get('f_c90k', 0) * k_mod) / gamma_M
-        
-        ratios = {}
+        spec.height
 
-        # Deflection (EC5 7.2)
-        # Using quasi-permanent combination for final deflection
-        psi_2 = 0.3  # standard for live loads in storage
-        k_def = factors['k_def']
+        ratios = {}
         
+        member_length = pynite_member.L()
+        
+        # SLS Deflection Check
+        deflection_limit = member_length / deflection_limit_factor
         u_inst_dl = abs(pynite_member.min_deflection('dy', 'DL'))
         u_inst_ll = abs(pynite_member.min_deflection('dy', 'LL'))
         
-        u_fin = u_inst_dl * (1 + k_def) + u_inst_ll * (1 + psi_2 * k_def)
-        ratios['deflection_ratio'] = u_fin / (L / 360)
+        # Final deflection including creep for quasi-permanent loads
+        u_final = u_inst_dl * (1 + factors.get('k_def', 0)) + u_inst_ll * (1 + psi_2_storage * factors.get('k_def', 0))
+        ratios['deflection'] = u_final / deflection_limit if deflection_limit > 0 else 0
 
-        # Retrieve Internal forces (ULS)
-        M_Ed = max(abs(pynite_member.max_moment('Mz', 'ULS_Strength')), abs(pynite_member.min_moment('Mz', 'ULS_Strength')))
-        V_Ed = max(abs(pynite_member.max_shear('Fy', 'ULS_Strength')), abs(pynite_member.min_shear('Fy', 'ULS_Strength')))
-        N_Ed_raw = [pynite_member.max_axial('ULS_Strength'), pynite_member.min_axial('ULS_Strength')]
-        N_Ed = max(N_Ed_raw, key=abs) # Max axial magnitude
-        T_Ed = max(abs(pynite_member.max_torque('ULS_Strength')), abs(pynite_member.min_torque('ULS_Strength')))
+        # ULS Internal Forces
+        max_moment_z = pynite_member.max_moment('Mz', ULS_COMBO)
+        min_moment_z = pynite_member.min_moment('Mz', ULS_COMBO)
+        M_Ed = max(abs(max_moment_z), abs(min_moment_z))
 
-        if factors['material_type'] == 'wood':
-            # Timber Member Design (EC5)
+        max_shear_y = pynite_member.max_shear('Fy', ULS_COMBO)
+        min_shear_y = pynite_member.min_shear('Fy', ULS_COMBO)
+        V_Ed = max(abs(max_shear_y), abs(min_shear_y))
+
+        max_axial = pynite_member.max_axial(ULS_COMBO)
+        min_axial = pynite_member.min_axial(ULS_COMBO)
+        N_Ed = max_axial if abs(max_axial) > abs(min_axial) else min_axial
+        
+        # ULS Strength & Stability Checks
+        material_type = factors.get('material_type')
+
+        if material_type == 'wood':
+            k_mod = factors['k_mod']
+            gamma_M = factors['gamma_M']
+
+            # Bending moment capacity
+            print(member.name)
+            calc_bending_moment_capacity(spec, geometry, material_props, member_length, k_mod, gamma_M)
+
+
+            f_bending_d = (material_props['f_mk'] * k_mod) / gamma_M
+            f_shear_d = (material_props['f_vk'] * k_mod) / gamma_M
+            f_tension_parallel_d = (material_props['f_t0k'] * k_mod) / gamma_M
+            f_compression_parallel_d = (material_props['f_c0k'] * k_mod) / gamma_M
+            f_compression_perp_d = (material_props['f_c90k'] * k_mod) / gamma_M
+
+            # Shear Check
+            effective_shear_width = spec.base * factors['k_cr']
+            shear_area = effective_shear_width * spec.height
+            shear_stress_d = 1.5 * V_Ed / shear_area if shear_area > 0 else 0
+            ratios['shear'] = shear_stress_d / f_shear_d if f_shear_d > 0 else 0
             
-            # Shear (with k_cr correction for cracks)
-            b_eff = member.spec.base * factors['k_cr']
-            shear_area = b_eff * member.spec.height
-            tau_d = 1.5 * V_Ed / shear_area if member.spec.shape == 'rectangular' else V_Ed / shear_area
-            ratios['shear_ratio'] = abs(tau_d) / f_vd
+            # Bending Stress
+            section_modulus_z = geometry.Iz / (spec.height / 2) if spec.height > 0 else 1e-9
+            bending_stress_d = M_Ed / section_modulus_z
 
-            # Bending stress
-            sigma_m_d = (M_Ed * (member.spec.height / 2.0)) / geom.Iz
-            ratios['bending_ratio'] = sigma_m_d / f_md
+            # Axial Stress
+            axial_stress_d = N_Ed / geometry.A if geometry.A > 0 else 0
 
-            # Axial stress
-            sigma_c0_d = abs(N_Ed) / geom.A
-            if N_Ed < 0: # Compression
-                ratios['axial_ratio'] = sigma_c0_d / f_c0d
-                P_crit = (np.pi**2 * mat_props['E_0'] * min(geom.Iy, geom.Iz)) / (L * buckling_K)**2
-                ratios['buckling_ratio'] = abs(N_Ed) / (P_crit / gamma_M) if P_crit > 0 else 10.0
-            else: # Tension
-                ratios['axial_ratio'] = sigma_c0_d / f_t0d
-                ratios['buckling_ratio'] = 0.0
+            # Stability - Column Buckling (if in compression)
+            k_c_y = 1.0 # Default to 1, i.e., no reduction
+            if N_Ed < 0:
+                E_0_05 = material_props['E_0'] / 1.5
+                radius_of_gyration_y = np.sqrt(geometry.Iy / geometry.A) if geometry.A > 0 else 1e-9
+                effective_length = buckling_K * member_length
+                slenderness_y = effective_length / radius_of_gyration_y if radius_of_gyration_y > 0 else 1e6
+                
+                relative_slenderness_y = (slenderness_y / np.pi) * np.sqrt(material_props['f_c0k'] / E_0_05) if E_0_05 > 0 else 1e6
+                
+                k_y = 0.5 * (1 + factors['beta_c'] * (relative_slenderness_y - 0.3) + relative_slenderness_y**2)
+                
+                # Check to avoid division by zero or invalid sqrt
+                if k_y**2 - relative_slenderness_y**2 >= 0 and (k_y + np.sqrt(k_y**2 - relative_slenderness_y**2)) > 0:
+                    k_c_y = min(1.0, 1 / (k_y + np.sqrt(k_y**2 - relative_slenderness_y**2)))
 
-            # Lateral Torsional Buckling (LTB) simplified
-            sigma_mcrit = (np.pi * (mat_props['E_0'] * geom.Iz * mat_props['G'] * geom.J)**0.5) / (L * geom.Iz/(member.spec.height/2))
-            rel_slenderness_m = (mat_props['f_mk'] / sigma_mcrit)**0.5
+            # Stability - Lateral Torsional Buckling
+            # Assuming frame is braced by planks and walls, so k_crit = 1.0
+            k_crit = 1.0
             
-            if rel_slenderness_m <= 0.75:
-                k_crit = 1.0
-            else:
-                # Simplified curve for solid timber
-                k_crit = 1.56 - 0.75 * rel_slenderness_m
-                k_crit = max(min(k_crit, 1.0), 0.1)
+            # Interaction Checks
+            if N_Ed < 0: # Compression and Bending
+                compression_term = abs(axial_stress_d) / (k_c_y * f_compression_parallel_d) if f_compression_parallel_d > 0 else 0
+                bending_term = bending_stress_d / (k_crit * f_bending_d) if f_bending_d > 0 else 0
+                ratios['interaction'] = compression_term + bending_term
+            else: # Tension and Bending
+                k_m = 0.7
+                tension_term = axial_stress_d / f_tension_parallel_d if f_tension_parallel_d > 0 else 0
+                bending_term = bending_stress_d / (k_crit * f_bending_d) if f_bending_d > 0 else 0
+                ratios['interaction'] = tension_term + k_m * bending_term
+                
+        elif material_type == 'steel':
+            gamma_M = factors['gamma_M']
+            yield_strength = material_props['f_mk']
             
-            ratios['ltb_ratio'] = sigma_m_d / (k_crit * f_md)
+            plastic_section_modulus_z = geometry.Iz / (spec.height / 2) * 1.12 if spec.height > 0 else 1e-9 # Approximation for I-sections
             
-            # Combined interaction (EC5 6.2.3/6.2.4 linear)
-            if N_Ed < 0: # Compression + Bending
-                interaction = (sigma_c0_d / f_c0d) + (sigma_m_d / f_md) + ratios.get('ltb_ratio', 0)*0 # Include LTB implicitly in bending term if needed
-                interaction_val = max(interaction, ratios['ltb_ratio']) # Take worse of interaction or LTB
-            else: # Tension + Bending
-                interaction_val = (sigma_c0_d / f_t0d) + (sigma_m_d / f_md)
-
-        elif factors['material_type'] == 'steel':
-            # Steel Member Design (EC3 - simplified)
-            M_pl_Rd = f_md * (geom.Iy / (member.spec.height / 2)) # f_md already includes gamma_M=1.0
-            N_pl_Rd = geom.A * f_md # actually fy/gammaM0
-            V_pl_Rd = (geom.A * 0.5) * (f_md / (3**0.5)) # approximate shear area
+            bending_resistance_d = plastic_section_modulus_z * yield_strength / gamma_M if gamma_M > 0 else 1e9
+            axial_resistance_d = geometry.A * yield_strength / gamma_M if gamma_M > 0 else 1e9
+            shear_resistance_d = (geometry.A * 0.58) * (yield_strength / np.sqrt(3)) / gamma_M if gamma_M > 0 else 1e9
             
-            # Check high shear (EC3 6.2.10)
-            if V_Ed > 0.5 * V_pl_Rd:
-                reduction_factor = (1 - (2 * V_Ed / V_pl_Rd - 1)**2)
-                M_pl_Rd *= reduction_factor
+            ratios['shear'] = V_Ed / shear_resistance_d if shear_resistance_d > 0 else 0
+            ratios['bending'] = M_Ed / bending_resistance_d if bending_resistance_d > 0 else 0
+            ratios['axial'] = abs(N_Ed) / axial_resistance_d if axial_resistance_d > 0 else 0
+            ratios['interaction'] = (abs(N_Ed) / axial_resistance_d if axial_resistance_d > 0 else 0) + (M_Ed / bending_resistance_d if bending_resistance_d > 0 else 0)
+        
+        # Bearing Check
+        if member.node_i in support_node_names or member.node_j in support_node_names:
+            bearing_area = spec.base * INPUT_PARAMS.wall_beam_contact_depth
+            if bearing_area > 0:
+                reaction_force_i = abs(pynite_member.shear('Fy', 0.0, ULS_COMBO))
+                bearing_stress_i = reaction_force_i / bearing_area
+                
+                reaction_force_j = abs(pynite_member.shear('Fy', member_length, ULS_COMBO))
+                bearing_stress_j = reaction_force_j / bearing_area
+                
+                bearing_stress_d = max(bearing_stress_i, bearing_stress_j)
+                
+                if material_type == 'wood':
+                    f_compression_perp_d = (material_props['f_c90k'] * k_mod) / gamma_M if gamma_M > 0 else 1e9
+                    ratios['bearing'] = bearing_stress_d / f_compression_perp_d if f_compression_perp_d > 0 else 0
             
-            ratios['shear_ratio'] = V_Ed / V_pl_Rd
-            ratios['bending_ratio'] = M_Ed / M_pl_Rd
-            ratios['axial_ratio'] = abs(N_Ed) / N_pl_Rd
-            
-            # Combined interaction (EC3 simplified linear conservatively)
-            interaction_val = (abs(N_Ed) / N_pl_Rd) + (M_Ed / M_pl_Rd)
-            ratios['buckling_ratio'] = 0.0 # Placeholder for Euler if needed
-        else:
-             interaction_val = 1e9 # Unknown material
+        valid_ratios = [val for val in ratios.values() if not np.isnan(val)]
+        member_utilization = max(valid_ratios) if valid_ratios else 0.0
 
-        # Bearing (EC5 6.1.5 with k_c90 enhancement)
-        bearing_area = member.spec.base * INPUT_PARAMS.wall_beam_contact_depth
-        if member.node_i in support_node_names:
-            reaction_force = abs(pynite_member.shear('Fy', 0, 'ULS_Strength'))
-            sigma_c90_d = reaction_force / bearing_area
-            ratios['wood_contact_i'] = sigma_c90_d / ((factors['k_c90'] * f_c90d))
-        if member.node_j in support_node_names:
-            reaction_force = abs(pynite_member.shear('Fy', L, 'ULS_Strength'))
-            sigma_c90_d = reaction_force / bearing_area
-            ratios['wood_contact_j'] = sigma_c90_d / ((factors['k_c90'] * f_c90d))
-
-        # Torsion
-        tau_tor_d = (T_Ed * (member.spec.height / 2.0)) / geom.J
-        ratios['torsion_ratio'] = abs(tau_tor_d) / f_vd
-
-        # Overall utilization considering all individual ratios and interaction
-        member_utilization = max(
-            interaction_val,
-            ratios['shear_ratio'],
-            ratios['deflection_ratio'],
-            ratios['torsion_ratio'],
-            ratios.get('buckling_ratio', 0),
-            ratios.get('wood_contact_i', 0),
-            ratios.get('wood_contact_j', 0),
-            ratios.get('brick_contact_i', 0),
-            ratios.get('brick_contact_j', 0)
-        )
-
-        results.append({
+        evaluation_results.append({
             'member_name': member.name,
-            'material_id': member.spec.material_id,
+            'material_id': spec.material_id,
             'ratios': ratios,
-            'member_utilization': float(member_utilization),
+            'member_utilization': member_utilization
         })
 
-    return results
+    all_ratio_keys = {key for res in evaluation_results for key in res['ratios'].keys()}
+    rows = []
+    for res in evaluation_results:
+        row_data = {
+            'member_name': res['member_name'],
+            'material_id': res['material_id'],
+            'member_utilization': res['member_utilization']
+        }
+        for key in all_ratio_keys:
+            row_data[f'ratio_{key}'] = res['ratios'].get(key)
+        rows.append(row_data)
+        
+    results_df = pd.DataFrame(rows)
+    
+    return evaluation_results, results_df
 
 
 def render(frame, deformed_scale=100, opacity=0.25) -> None:

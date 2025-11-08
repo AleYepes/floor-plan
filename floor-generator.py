@@ -1,6 +1,6 @@
 from dataclasses import dataclass, replace
 from enum import member
-from re import L
+from re import A, L
 from typing import List, Dict, Optional, Tuple, Literal
 from Pynite import FEModel3D
 from Pynite.Rendering import Renderer
@@ -508,20 +508,17 @@ def calculate_purchase_quantity(frame: FEModel3D, members: List[Member]):
     return total_cost, all_material_cuts
 
 
-def calc_bending_moment_capacity(spec, geometry, material_props: Dict[str, float], member_length, k_mod: float, gamma_M: float):
-
+def _calc_bending_moment_capacity(k_mod, gamma_M, material_props, spec, geometry, member_length):
+    # Chapter 4 Bending
     f_m_d = (material_props['f_mk'] * k_mod) / gamma_M
     section_modulus_W = geometry.Iy / (spec.height / 2)
     effective_length = member_length * 0.9
 
-    critical_bending_stress = (0.78 * spec.base**2 / (spec.height * effective_length)) * material_props['E_05']
-    print(critical_bending_stress)
+    # critical_bending_stress = (0.78 * spec.base**2 / (spec.height * effective_length)) * material_props['E_05']
     critical_bending_moment_strong_axis = math.pi * math.sqrt(material_props['E_05'] * geometry.Iz * material_props['G_05'] * geometry.J)
     critical_bending_stress = critical_bending_moment_strong_axis / (section_modulus_W * effective_length)
-    print(critical_bending_stress)
-    print()
-    relative_slenderness_ratio = math.sqrt(material_props['f_mk'] / critical_bending_stress)
 
+    relative_slenderness_ratio = math.sqrt(material_props['f_mk'] / critical_bending_stress)
     if relative_slenderness_ratio <= 0.75:
         lateral_buckling_factor_k_crit = 1.0
     elif relative_slenderness_ratio <= 1.4:
@@ -532,6 +529,43 @@ def calc_bending_moment_capacity(spec, geometry, material_props: Dict[str, float
     bending_moment_capacity = f_m_d * section_modulus_W * lateral_buckling_factor_k_crit
 
     return bending_moment_capacity
+
+def _calc_axial_tension_capacity(k_mod, gamma_M, material_props, geometry):
+    # Chapter 5.1 Axial Tension
+    f_t0_d = (material_props['f_t0k'] * k_mod) / gamma_M
+    f_t90_d = (material_props['f_t90k'] * k_mod) / gamma_M
+    axial_tension_capacity_0 = f_t0_d * geometry.A
+    axial_tension_capacity_90 = f_t90_d * geometry.A
+
+    return axial_tension_capacity_0, axial_tension_capacity_90
+
+
+def _calc_axial_compression_capacity(k_mod, gamma_M, material_props, spec, geometry, member_length):
+    # Chapter 5.2 Axial Compression
+    radius_gyration = math.sqrt(geometry.Iy / geometry.A)
+    effective_length = member_length * 0.9
+    slenderness_ratio = effective_length / radius_gyration
+    relative_slenderness_ratio = (slenderness_ratio / math.pi) * math.sqrt(material_props['f_c0k'] / material_props['E_05'])
+    if spec.material.startswith('c'):
+        staightness_factor_beta_c = 0.2
+    else:
+        staightness_factor_beta_c = 0.1
+    instability_factor_k = (0.5 * (1 + staightness_factor_beta_c * (relative_slenderness_ratio - 0.3) + relative_slenderness_ratio**2))
+    instability_factor_c = 1 / (instability_factor_k + math.sqrt(instability_factor_k**2 - relative_slenderness_ratio**2))
+    f_c0_d = (material_props['f_c0k'] * k_mod) / gamma_M
+    axial_compression_capacity_0 = f_c0_d * geometry.A * instability_factor_c
+
+    if spec.material.startswith('c'):
+        config_and_deformation_factor_k_c90 = 1.5
+    elif spec.material.startswith('gl'):
+        config_and_deformation_factor_k_c90 = 1.75
+    else:
+        config_and_deformation_factor_k_c90 = 1
+    f_c90_d = (material_props['f_c90k'] * k_mod) / gamma_M
+    effective_contact_area = spec.base * INPUT_PARAMS.wall_beam_contact_depth
+    axial_compression_capacity_90 = config_and_deformation_factor_k_c90 * f_c90_d * effective_contact_area
+
+    return axial_compression_capacity_0, axial_compression_capacity_90
 
 
 def evaluate_stresses(frame: FEModel3D, members: List[Member]):
@@ -556,7 +590,7 @@ def evaluate_stresses(frame: FEModel3D, members: List[Member]):
     frame.add_load_combo(ULS_COMBO, {'DL': 1.35, 'LL': 1.5})
     frame.analyze(check_stability=False)
 
-    psi_2_storage = 0.8  # Quasi-permanent factor for storage areas (Category E)
+    psi_2_storage = 0.8
     buckling_K = 1.0
     deflection_limit_factor = 300
     support_node_names = {node.name for node in frame.nodes.values() if node.name.endswith(('_N', '_S'))}
@@ -605,9 +639,9 @@ def evaluate_stresses(frame: FEModel3D, members: List[Member]):
             k_mod = factors['k_mod']
             gamma_M = factors['gamma_M']
 
-            # Bending moment capacity
-            print(member.name)
-            calc_bending_moment_capacity(spec, geometry, material_props, member_length, k_mod, gamma_M)
+            bending_moment_capacity = _calc_bending_moment_capacity(k_mod, gamma_M, material_props, spec, geometry, member_length)
+            axial_tension_capacity_0, axial_tension_capacity_90 = _calc_axial_tension_capacity(k_mod, gamma_M, material_props, geometry)
+            axial_compression_capacity_0, axial_compression_capacity_90 = _calc_axial_compression_capacity(k_mod, gamma_M, material_props, spec, geometry, member_length)
 
 
             f_bending_d = (material_props['f_mk'] * k_mod) / gamma_M

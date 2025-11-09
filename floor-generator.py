@@ -402,22 +402,27 @@ def _find_compatible_connector(base: float, height: float):
     
 
 def apply_loads(frame: FEModel3D, members: List[Member]) -> None:
+    total_dl, total_ll = 0, 0
+
     # Dead loads
     for member in members:
         geom = member.spec.get_geometry()
         material = MATERIAL_STRENGTHS[member.spec.material]
         dead_load = -geom.A * material['rho']
         frame.add_member_dist_load(member.name, 'FY', dead_load, dead_load, case=DL_COMBO)
+        total_dl += dead_load
 
         if member.name.startswith('tail'):
             header = next((m for m in members if m.name.startswith('header')))
             connector = _find_compatible_connector(base=member.spec.base, height=header.spec.height)
             frame.add_member_pt_load(member.name, 'FY', -connector['weight_N'], 0)
+            total_dl += -connector['weight_N']
         elif member.name.startswith('header'):
             trimmer = next((m for m in members if m.name.startswith('trimmer')))
             connector = _find_compatible_connector(base=member.spec.base, height=trimmer.spec.height)
             frame.add_member_pt_load(member.name, 'FY', -connector['weight_N'], 0, case=DL_COMBO)
             frame.add_member_pt_load(member.name, 'FY', -connector['weight_N'], frame.members[member.name].L(), case=DL_COMBO)
+            total_dl += -connector['weight_N'] * 2
 
     # Live loads
     plank_members = [m for m in members if m.name.startswith('p')]
@@ -446,9 +451,12 @@ def apply_loads(frame: FEModel3D, members: List[Member]) -> None:
         
         live_load = -INPUT_PARAMS.live_load_mpa * tributary_width
         frame.add_member_dist_load(member.name, 'FY', live_load, live_load, case=LL_COMBO)
+        total_ll += live_load
 
     # Combined load
     frame.add_load_combo(ULS_COMBO, {'DL': 1.35, 'LL': 1.5})
+
+    return total_dl, total_ll
 
 
 def create_model(
@@ -463,9 +471,9 @@ def create_model(
     nodes, members = calculate_nodes_and_members(east_joists, west_joists, tail_joists, trimmers, header, planks)
     frame = assemble_frame(nodes, members)
     define_supports(frame, nodes, INPUT_PARAMS.wall_thickness, 'brick', walls=walls)
-    apply_loads(frame, members)
+    total_dl, total_ll = apply_loads(frame, members)
     
-    return frame, nodes, members
+    return frame, nodes, members, total_dl, total_ll
 
 
 def calculate_purchase_quantity(frame: FEModel3D, members: List[Member]):
@@ -530,158 +538,269 @@ def calculate_purchase_quantity(frame: FEModel3D, members: List[Member]):
 
 
 def _calc_size_factor_kh(spec):
+    """
+    Chapter 3.3 Size effects (EN 1995-1-1, 3.2-3.4)
+
+    k_h : size factor 
+    """
     if spec.material.startswith('c') and spec.height <= 150:
-        size_factor_kh = min((150/spec.height)**0.2, 1.3)
+        k_h = min((150/spec.height)**0.2, 1.3)
     elif spec.material.startswith('gl') and spec.height <= 600:
-        size_factor_kh = min((150/spec.height)**0.1, 1.1)
+        k_h = min((150/spec.height)**0.1, 1.1)
     else:
-        size_factor_kh = 1
-    return size_factor_kh
-
-
-def _calc_instability_factor(factors, material_props, geometry, member_length):
-    beta_c = factors['straightness_factor_beta_c']
-    
-    radius_gyration = math.sqrt(geometry.Iy / geometry.A)
-    effective_length = member_length * 0.9
-    slenderness_ratio = effective_length / radius_gyration
-    relative_slenderness_ratio = (slenderness_ratio / math.pi) * math.sqrt(material_props['f_c0k'] / material_props['E_05'])
-    risk_buckling = relative_slenderness_ratio > 0.3
-
-    instability_factor_k = (0.5 * (1 + beta_c * (relative_slenderness_ratio - 0.3) + relative_slenderness_ratio**2))
-    instability_factor_c = 1 / (instability_factor_k + math.sqrt(instability_factor_k**2 - relative_slenderness_ratio**2))
+        k_h = 1
+    return k_h
 
 
 def _calc_bending_moment_capacity(factors, material_props, spec, geometry, member_length):
-    # Chapter 4 Bending
+    """
+    Chapter 4 Bending (EN 1995-1-1, 6.3.3)
+    
+    M_yRd : bending moment capacity about the strong axis (y)
+    M_zRd : bending moment capacity about the weak axis (z)
+    f_md : design value of bending strength
+    k_crit : factor accounting for the effect of lateral buckling
+    W_y : section modulus about the strong axis (y)
+    W_z : section modulus about the strong axis (z)
+
+    k_h : size factor 
+    lambda_rel_m : relative slenderness ratio in bending
+    omega_m_crit : critical bending stress calculated according to the classical theory of lateral stability, using 5-percentile stiffness values (EN 1995-1-1, 6.3.3)
+    M_y_crit : critical bending moment about the strong axis (y)
+    E_05 : 5th percentile value for modulus of elasticity parallel to grain
+    G_05 : 5th percentile value for shear modulus parallel to the fibers
+    Iy : second moment of area about the strong axis (y)
+    Iz : second moment of area about the weak axis (z)
+    J : torsional moment of inertia
+    l_ef : effective length of the beam for a uniformly distributed load
+    """
     k_mod = factors['k_mod']
     gamma_M = factors['gamma_M']
-    size_factor_kh = _calc_size_factor_kh(spec)
+    k_h = _calc_size_factor_kh(spec)
 
-    f_m_d = (size_factor_kh * material_props['f_mk'] * k_mod) / gamma_M
-    section_modulus_W_y = geometry.Iy / (spec.height / 2)
-    section_modulus_W_z = geometry.Iz / (spec.base / 2)
-    effective_length = member_length * 0.9
+    f_md = (k_h * material_props['f_mk'] * k_mod) / gamma_M
+    W_y = geometry.Iy / (spec.height / 2)
+    W_z = geometry.Iz / (spec.base / 2)
+    l_ef = member_length * 0.9
 
-    critical_bending_moment_strong_axis = math.pi * math.sqrt(material_props['E_05'] * geometry.Iz * material_props['G_05'] * geometry.J)
-    critical_bending_stress = critical_bending_moment_strong_axis / (section_modulus_W_y * effective_length)
+    M_y_crit = math.pi * math.sqrt(material_props['E_05'] * geometry.Iz * material_props['G_05'] * geometry.J)
+    omega_m_crit = M_y_crit / (W_y * l_ef)
 
-    relative_slenderness_ratio = math.sqrt(material_props['f_mk'] / critical_bending_stress)
-    if relative_slenderness_ratio <= 0.75:
-        lateral_buckling_factor_k_crit = 1.0
-    elif relative_slenderness_ratio <= 1.4:
-        lateral_buckling_factor_k_crit = 1.56 - 0.75 * relative_slenderness_ratio
+    lambda_rel_m = math.sqrt(material_props['f_mk'] / omega_m_crit)
+    if lambda_rel_m <= 0.75:
+        k_crit = 1.0
+    elif lambda_rel_m <= 1.4:
+        k_crit = 1.56 - 0.75 * lambda_rel_m
     else:
-        lateral_buckling_factor_k_crit = 1 / relative_slenderness_ratio ** 2
+        k_crit = 1 / lambda_rel_m ** 2
 
-    bending_moment_capacity_y = f_m_d * section_modulus_W_y * lateral_buckling_factor_k_crit
-    bending_moment_capacity_z = f_m_d * section_modulus_W_z
+    M_yRd = f_md * W_y * k_crit
+    M_zRd = f_md * W_z
 
-    return bending_moment_capacity_y, bending_moment_capacity_z
+    return M_yRd, M_zRd
 
 
-def _calc_axial_tension_capacity(factors, material_props, geometry):
-    # Chapter 5.1 Axial Tension
+def _calc_axial_tension_capacity(factors, material_props, spec, geometry):
+    """
+    Chapter 5.1 Axial Tension
+
+    N_t0Rd : design load capacity in axial tension about the strong axis (y)
+    f_t0k : characteristic tension strength parallel to grain
+    f_t0d : design tension strength parallel to grain
+    A : cross-sectional area
+    """
     k_mod = factors['k_mod']
     gamma_M = factors['gamma_M']
 
-    f_t0_d = (material_props['f_t0k'] * k_mod) / gamma_M
-    f_t90_d = (material_props['f_t90k'] * k_mod) / gamma_M
-    axial_tension_capacity_0 = f_t0_d * geometry.A
-    axial_tension_capacity_90 = f_t90_d * geometry.A
+    f_t0d = (material_props['f_t0k'] * k_mod) / gamma_M
+    N_t0Rd = f_t0d * geometry.A
+    f_t90d = (material_props['f_t90k'] * k_mod) / gamma_M
+    N_t90Rd = f_t90d * geometry.A
 
-    return axial_tension_capacity_0, axial_tension_capacity_90
+    return N_t0Rd, N_t90Rd
 
 
-def _get_bending_axial_tension_ratio(spec, M_y_Rd, M_z_Rd, Nt_0_Rd, M_y_Ed, M_z_Ed, Nt_0_Ed):
-    # Chapter 7.2 Combined bending and axial tension
-    if spec.shape == 'rectangular':
-        reduction_factor_km = 0.7
-    else:
-        reduction_factor_km = 1
+def _calc_bending_axial_tension_ratio(spec, M_yRd, M_zRd, N_t0Rd, M_yEd, M_zEd, N_t0Ed, k_m):
+    """
+    Chapter 7.2 Combined bending and axial tension (EN 1995-1-1, 6.2.3)
 
-    ratio_y = (M_y_Ed / M_y_Rd * reduction_factor_km) + (M_z_Ed / M_z_Rd) + (Nt_0_Ed / Nt_0_Rd)
-    ratio_z = (M_y_Ed / M_y_Rd) + (M_z_Ed / M_z_Rd * reduction_factor_km) + (Nt_0_Ed / Nt_0_Rd)
+    ratio_y, ratio_z : ratios for member stress over member capacity
+    Member failure occurs when ratio_y or ratio_z exceed a value of 1
+
+    M_yEd : design load effect from bending moments about the strong axis (y)
+    M_zEd : design load effect from bending moments about the weak axis (z)
+    N_t0Ed : design load effect from axial tension about the strong axis (y)
+
+    M_zRd : design load capacity in bending moments about the strong axis (y)
+    M_zRd : design load capacity in bending moments about the weak axis (z)
+    N_t0Rd : design load capacity in axial tension about the strong axis (y)
+
+    k_m: reduction factor depending on cross-sectional shape
+    """
+    ratio_y = (M_yEd / M_yRd * k_m) + (M_zEd / M_zRd) + (N_t0Ed / N_t0Rd)
+    ratio_z = (M_yEd / M_yRd) + (M_zEd / M_zRd * k_m) + (N_t0Ed / N_t0Rd)
 
     return ratio_y, ratio_z
 
 
+def _calc_instability_factor(factors, material_props, geometry, member_length):
+    """
+    Chapter 5.2 Compression (EN 1995-1-1, 6.3.2)
+
+    f_c0k : characteristic compression strength parallel to grain
+    k, k_c : instability factors
+    lambda : slenderness ratio
+    lambda_rel : relative slenderness ratio
+    l_e : effective length
+    i : radius of gyration
+    """
+    beta_c = factors['straightness_factor_beta_c']
+    
+    i_y = math.sqrt(geometry.Iy / geometry.A)
+    i_z = math.sqrt(geometry.Iz / geometry.A)
+    l_e = member_length * 0.9
+    lambda_y = l_e / i_y
+    lambda_z = l_e / i_z
+    lambda_y_rel = (lambda_y / math.pi) * math.sqrt(material_props['f_c0k'] / material_props['E_05'])
+    lambda_z_rel = (lambda_z / math.pi) * math.sqrt(material_props['f_c0k'] / material_props['E_05'])
+    risk_buckling = lambda_y_rel > 0.3 or lambda_z_rel > 0.3
+
+    k_y = (0.5 * (1 + beta_c * (lambda_y_rel - 0.3) + lambda_y_rel**2))
+    k_cy = 1 / (k_y + math.sqrt(k_y**2 - lambda_y_rel**2))
+    k_z = (0.5 * (1 + beta_c * (lambda_z_rel - 0.3) + lambda_z_rel**2))
+    k_cz = 1 / (k_z + math.sqrt(k_z**2 - lambda_z_rel**2))
+
+    return k_cy, k_cz, risk_buckling
+
+
 def _calc_axial_compression_capacity(factors, material_props, spec, geometry, member_length):
-    # Chapter 5.2 Axial Compression
+    """
+    Chapter 5.2 Axial Compression
+    
+    N_c0Rd : design load capacity in axial compression about the strong axis (y)
+    N_c90Rd : design load capacity in axial compression about the weak axis (z)
+
+    f_c0k : characteristic compression strength parallel to grain
+    f_c0d : design compression strength parallel to grain
+    f_c90k : characteristic compression strength perpendicular to grain
+    f_c90d : design compression strength perpendicular to grain
+
+    k_h : size factor
+    k_cz : instability factor c about the weak axis (z)
+    k_cy : instability factor c about the strong axis (y)
+
+    A_ef : effective contact area in compression
+    """
     k_mod = factors['k_mod']
     gamma_M = factors['gamma_M']
-    size_factor_kh = _calc_size_factor_kh(spec)
+    k_h = _calc_size_factor_kh(spec)
     k_c90 = factors['config_and_deformation_factor_k_c90']
-    beta_c = factors['straightness_factor_beta_c']
-    f_c90_d = (material_props['f_c90k'] * k_mod) / gamma_M
+    f_c90d = (material_props['f_c90k'] * k_mod) / gamma_M
+    k_cy, k_cz, risk_buckling = _calc_instability_factor(factors, material_props, geometry, member_length)
 
-    radius_gyration = math.sqrt(geometry.Iy / geometry.A)
-    effective_length = member_length * 0.9
-    slenderness_ratio = effective_length / radius_gyration
-    relative_slenderness_ratio = (slenderness_ratio / math.pi) * math.sqrt(material_props['f_c0k'] / material_props['E_05'])
-    risk_buckling = relative_slenderness_ratio > 0.3
+    f_c0d = (k_h * material_props['f_c0k'] * k_mod) / gamma_M
+    N_c0Rd = f_c0d * geometry.A * k_cy
 
-    instability_factor_k = (0.5 * (1 + beta_c * (relative_slenderness_ratio - 0.3) + relative_slenderness_ratio**2))
-    instability_factor_c = 1 / (instability_factor_k + math.sqrt(instability_factor_k**2 - relative_slenderness_ratio**2))
+    A_ef = spec.base * INPUT_PARAMS.wall_beam_contact_depth
+    N_c90Rd = k_c90 * f_c90d * A_ef
 
-    f_c0_d = (size_factor_kh * material_props['f_c0k'] * k_mod) / gamma_M
-    axial_compression_capacity_0 = f_c0_d * geometry.A * instability_factor_c
-
-    effective_contact_area = spec.base * INPUT_PARAMS.wall_beam_contact_depth
-    axial_compression_capacity_90 = k_c90 * f_c90_d * effective_contact_area
-
-    return axial_compression_capacity_0, axial_compression_capacity_90, risk_buckling
+    return N_c0Rd, N_c90Rd, k_cy, k_cz, risk_buckling
 
 
-def _get_bending_axial_compression_ratio(spec, risk_buckling, M_y_Rd, M_z_Rd, Nc_0_Rd, M_y_Ed, M_z_Ed, Nc_0_Ed):
-    # Chapter 7.3 Combined bending and axial compression
-    if spec.shape == 'rectangular':
-        reduction_factor_km = 0.7
-    else:
-        reduction_factor_km = 1
+def _calc_bending_axial_compression_ratio(risk_buckling, M_yRd, M_zRd, N_c0Rd, M_yEd, M_zEd, N_c0Ed, k_cy, k_cz):
+    """
+    Chapter 7.3 Combined bending and axial compression (EN 1995-1-1, 6.2.4, 6.3.2)
 
+    ratio_y, ratio_z : ratios for member stress over member capacity
+    Member failure occurs when ratio_y or ratio_z exceed a value of 1
+
+    M_yEd : design load effect from bending moments about the strong axis (y)
+    M_zEd : design load effect from bending moments about the weak axis (z)
+    N_c0Ed : design load effect from axial compression about the strong axis (y)
+
+    M_zRd : design load capacity in bending moments about the strong axis (y)
+    M_zRd : design load capacity in bending moments about the weak axis (z)
+    N_c0Rd : design load capacity in axial compression about the strong axis (y)
+
+    k_m : reduction factor depending on cross-sectional shape
+    k_cz : instability factor c about the weak axis (z)
+    k_cy : instability factor c about the strong axis (y)
+    """
     if risk_buckling:
-        ratio_y = (M_y_Ed / M_y_Rd * reduction_factor_km) + (M_z_Ed / M_z_Rd) + (Nc_0_Ed / Nc_0_Rd)
-        ratio_z = (M_y_Ed / M_y_Rd) + (M_z_Ed / M_z_Rd * reduction_factor_km) + (Nc_0_Ed / Nc_0_Rd)
+        ratio_y = (M_yEd / M_yRd * k_m) + (M_zEd / M_zRd) + (N_c0Ed / (N_c0Rd * k_cz))
+        ratio_z = (M_yEd / M_yRd) + (M_zEd / M_zRd * k_m) + (N_c0Ed / (N_c0Rd * k_cy))
     else:
-        ratio_y = (M_y_Ed / M_y_Rd * reduction_factor_km) + (M_z_Ed / M_z_Rd) + (Nc_0_Ed / Nc_0_Rd)**2
-        ratio_z = (M_y_Ed / M_y_Rd) + (M_z_Ed / M_z_Rd * reduction_factor_km) + (Nc_0_Ed / Nc_0_Rd)**2
-
+        ratio_y = (M_yEd / M_yRd * k_m) + (M_zEd / M_zRd) + (N_c0Ed / N_c0Rd)**2
+        ratio_z = (M_yEd / M_yRd) + (M_zEd / M_zRd * k_m) + (N_c0Ed / N_c0Rd)**2
 
     return ratio_y, ratio_z
 
 
 def _calc_shear_capacity(factors, material_props, spec, geometry):
-    # Chapter 6 Cross section subjected to shear
+    """
+    Chapter 6 Cross section subjected to shear (EN 1995-1-1, 6.1.7 - 6.1.8)
+    
+    f_vk : characteristic shear strength
+    f_vd : design shear strength
+    b_ef : effective width
+    V_Rd : design load capacity in shear strength
+    """
     k_mod = factors['k_mod']
     gamma_M = factors['gamma_M']
     k_cr = factors['k_cr']
 
-    f_v_d = (material_props['f_vk'] * k_mod) / gamma_M
-    shear_capacity = f_v_d * geometry.A / 1.5
-
     if spec.material.startswith('c') or spec.material.startswith('gl'):
-        effective_width = spec.base * k_cr
+        b_ef = spec.base * k_cr
+    else:
+        b_ef = spec.base
 
-    return shear_capacity
+    f_vd = (material_props['f_vk'] * k_mod) / gamma_M
+    V_Rd = f_vd * b_ef * spec.height / 1.5
+
+    return V_Rd
 
 
-def evaluate_stresses(frame: FEModel3D, members: List[Member]):
-    # Using equations and values detailed in https://www.swedishwood.com/siteassets/5-publikationer/pdfer/sw-design-of-timber-structures-vol2-2022.pdf
+def calculate_vibration_characteristics(material_props, geometry, floor_length_m, floor_width_m, total_dl, total_ll):
+    """
+    Chapter 9.4 Vibrations
 
-    frame.add_load_combo(ULS_COMBO, {'DL': 1.35, 'LL': 1.5})
+    w : instantaneous maximum vertical deflection caused by a concentrated static force F applied at any point on the floor taking into account load distribution
+    v : unit impulse velocity response, which is the initial value of vertical floor velocity caused by a unit impulse of 1 Ns applied at any point of the floor
+    zeta : modal damping ratio (a typical value for timber floors can be 0,01)
+    f_1 : fundamental frequency of floor
+    """
+    EI_l = material_props['E_05'] * geometry.Iy
+    EI_B = material_props['E_05'] * geometry.Iz
+
+    mass_per_area_Nm2 = total_ll + total_dl / (floor_length_m * floor_width_m)
+    mass_per_area_kgm2 = mass_per_area_Nm2 / 10
+
+    f_1 = (math.pi / (2 * floor_length_m**2)) * math.sqrt(EI_l / mass_per_area_kgm2)
+
+    if f_1 >= 40:
+        n_40 = 0.0
+    else:
+        term1 = (40 / f_1)**2 - 1
+        term2 = (floor_width_m / floor_length_m)**4
+        term3 = EI_l / EI_B
+        n_40 = (term1 * term2 * term3)**0.25
+
+    numerator = 4 * (0.4 + 0.6 * n_40)
+    denominator = (mass_per_area_kgm2 * floor_width_m * floor_length_m) + 200
+    v = numerator / denominator
+
+    return f_1, n_40, v
+
+
+def evaluate_stresses(frame: FEModel3D, members: List[Member], total_dl, total_ll):
+    # Following chapters in https://www.swedishwood.com/siteassets/5-publikationer/pdfer/sw-design-of-timber-structures-vol2-2022.pdf
+
     frame.analyze(check_stability=False)
-
-    psi_0_storage = 1
-    psi_1_storage = 0.9
-    psi_2_storage = 0.8
-    buckling_K = 1.0
     support_node_names = {node.name for node in frame.nodes.values() if node.name.endswith(('_N', '_S'))}
     
-    evaluation_results = []
+    member_evaluations = []
     for member in members:
         ratios = {}
-
         pynite_member = frame.members[member.name]
         spec = member.spec
         geometry = spec.get_geometry()
@@ -691,95 +810,112 @@ def evaluate_stresses(frame: FEModel3D, members: List[Member]):
         # ULS Internal Forces
         max_moment_y = pynite_member.max_moment('My', ULS_COMBO)
         min_moment_y = pynite_member.min_moment('My', ULS_COMBO)
-        M_y_Ed = max(abs(max_moment_y), abs(min_moment_y))
+        M_yEd = max(abs(max_moment_y), abs(min_moment_y))
 
         max_moment_z = pynite_member.max_moment('Mz', ULS_COMBO)
         min_moment_z = pynite_member.min_moment('Mz', ULS_COMBO)
-        M_z_Ed = max(abs(max_moment_z), abs(min_moment_z))
+        M_zEd = max(abs(max_moment_z), abs(min_moment_z))
 
-        Nt_0_Ed = pynite_member.max_axial(ULS_COMBO)
-        Nc_0_Ed = pynite_member.min_axial(ULS_COMBO)
+        N_t0Ed = pynite_member.max_axial(ULS_COMBO)
+        N_c0Ed = pynite_member.min_axial(ULS_COMBO)
 
         max_shear_y = pynite_member.max_shear('Fy', ULS_COMBO)
         min_shear_y = pynite_member.min_shear('Fy', ULS_COMBO)
         V_Ed = max(abs(max_shear_y), abs(min_shear_y))
+
+        max_torsion_y = pynite_member.max_torque('Fy', ULS_COMBO)
+        min_torsion_y = pynite_member.min_torque('Fy', ULS_COMBO)
+        tau_tor_d = max(abs(max_torsion_y), abs(min_torsion_y))
         
-        if factors.material_type.startswith('s'):
+        if spec.material.startswith('s'):
+            pass
             # gamma_M = factors['gamma_M']
             # yield_strength = material_props['f_mk']
             
             # plastic_section_modulus_z = geometry.Iz / (spec.height / 2) * 1.12 if spec.height > 0 else 1e-9 # Approximation for I-sections
             
-            # bending_resistance_d = plastic_section_modulus_z * yield_strength / gamma_M if gamma_M > 0 else 1e9
-            # axial_resistance_d = geometry.A * yield_strength / gamma_M if gamma_M > 0 else 1e9
-            # shear_resistance_d = (geometry.A * 0.58) * (yield_strength / np.sqrt(3)) / gamma_M if gamma_M > 0 else 1e9
+            # bending_resistance_d = plastic_section_modulus_z * yield_strength / gamma_M
+            # axial_resistance_d = geometry.A * yield_strength / gamma_M
+            # shear_resistance_d = (geometry.A * 0.58) * (yield_strength / np.sqrt(3)) / gamma_M
             
             # ratios['shear'] = V_Ed / shear_resistance_d
-            # ratios['bending'] = M_y_Ed / bending_resistance_d
-            # ratios['axial'] = abs(Nt_0_Ed) / axial_resistance_d
-            # ratios['interaction'] = (abs(Nt_0_Ed) / axial_resistance_d) + (M_y_Ed / bending_resistance_d)
-        else:          
-            # Combined bending and axial tension check
-            M_y_Rd, M_z_Rd = _calc_bending_moment_capacity(factors, material_props, spec, geometry, pynite_member.L())
-            Nt_0_Rd, Nt_Rd_90 = _calc_axial_tension_capacity(factors, material_props, geometry)
+            # ratios['bending'] = M_yEd / bending_resistance_d
+            # ratios['axial'] = abs(N_t0Ed) / axial_resistance_d
+            # ratios['interaction'] = (abs(N_t0Ed) / axial_resistance_d) + (M_yEd / bending_resistance_d)
+        else:
+            if spec.shape == 'rectangular':
+                k_m = 0.7
+            else:
+                k_m = 1
 
-            bending_axial_tension_y, bending_axial_tension_z = _get_bending_axial_tension_ratio(spec, M_y_Rd, M_z_Rd, Nt_0_Rd, M_y_Ed, M_z_Ed, Nt_0_Ed)
-            ratios['bending_axial_tension_y'] = bending_axial_tension_y
-            ratios['bending_axial_tension_z'] = bending_axial_tension_z
+            # (EN 1995-1-1, 6.1.6)
+            M_yRd, M_zRd = _calc_bending_moment_capacity(factors, material_props, spec, geometry, pynite_member.L())
+            ratios['bending_y'] = (M_yEd / M_yRd * k_m) + (M_zEd / M_zRd)
+            ratios['bending_z'] = (M_yEd / M_yRd) + (M_zEd / M_zRd * k_m)
 
-            # Combined bending and axial compression check
-            Nc_0_Rd, Nc_Rd_90, risk_buckling = _calc_axial_compression_capacity(factors, material_props, spec, geometry, pynite_member.L())
-            bending_axial_compression_y, bending_axial_compression_z = _get_bending_axial_compression_ratio(spec, risk_buckling, M_y_Rd, M_z_Rd, Nc_0_Rd, M_y_Ed, M_z_Ed, Nc_0_Ed)
+            # (EN 1995-1-1, 6.1.2 - 6.1.3)
+            N_t0Rd, N_t90Rd = _calc_axial_tension_capacity(factors, material_props, geometry)
+            ratios['axial_tension_ratio_0'] = N_t0Ed / N_t0Rd
+            # ratios['axial_tension_ratio_90'] = N_t90Ed / N_t0Rd
 
+            # (EN 1995-1-1, 6.2.3)
+            bending_axial_tension_ratio_y, bending_axial_tension_ratio_z = _calc_bending_axial_tension_ratio(spec, M_yRd, M_zRd, N_t0Rd, M_yEd, M_zEd, N_t0Ed, k_m)
+            ratios['bending_axial_tension_ratio_y'] = bending_axial_tension_ratio_y
+            ratios['bending_axial_tension_ratio_z'] = bending_axial_tension_ratio_z
 
-            shear_capacity = _calc_shear_capacity(factors, material_props, spec, geometry)
+            # (EN 1995-1-1, 6.1.4 - 6.1.5)
+            N_c0Rd, N_c90Rd, k_cy, k_cz, risk_buckling = _calc_axial_compression_capacity(factors, material_props, spec, geometry, pynite_member.L())
+            ratios['axial_compression_ratio_0'] = N_c0Ed / N_c0Rd
+            # ratios['axial_compression_ratio_90'] = N_c90Ed / (N_c90Rd * factors['config_and_deformation_factor_k_c90'])
 
-            # SLS deflection check
+            # (EN 1995-1-1, 6.2.4, 6.3.2)
+            bending_axial_compression_ratio_y, bending_axial_compression_ratio_z = _calc_bending_axial_compression_ratio(risk_buckling, M_yRd, M_zRd, N_c0Rd, M_yEd, M_zEd, N_c0Ed, k_cy, k_cz, k_m)
+            ratios['bending_axial_compression_ratio_y'] = bending_axial_compression_ratio_y
+            ratios['bending_axial_compression_ratio_z'] = bending_axial_compression_ratio_z
+
+            # (EN 1995-1-1, 6.1.7)
+            V_Rd = _calc_shear_capacity(factors, material_props, spec, geometry)
+            ratios['shear'] = V_Ed / V_Rd
+
+            # (EN 1995-1-1, 6.1.8)
+            k_shape = min(1 + (0.15 * spec.height/spec.base), 2)
+            f_vd = (material_props['f_vk'] * factors['k_mod']) / factors['gamma_M']
+            ratios['torsion'] = tau_tor_d / (k_shape * f_vd)
+
+            # Deflection check
             w_inst_dl = abs(pynite_member.min_deflection('dy', 'DL'))
             w_inst_ll = abs(pynite_member.min_deflection('dy', 'LL'))
-            w_fin = w_inst_dl * (1 + factors.get('k_def', 0)) + w_inst_ll * (1 + psi_2_storage * factors.get('k_def', 0))
-            ratios['net_deflection'] = w_fin / (pynite_member.L()/150)
+            w_fin = w_inst_dl * (1 + factors.get['k_def']) + w_inst_ll * (1 + factors.get['psi_2'] * factors.get['k_def'])
+            ratios['net_deflection'] = w_fin / (pynite_member.L() / 225)
+
+            # Vibration (turn into a function)
+            floor_width_m = INPUT_PARAMS['floor_width']/1000
+            floor_length_m = INPUT_PARAMS['floor_length']/1000
+            f_1, n_40, v = calculate_vibration_characteristics(material_props, geometry, floor_length_m, floor_width_m, total_dl, total_ll)
         
         # Bearing Check
         if member.node_i in support_node_names or member.node_j in support_node_names:
             bearing_area = spec.base * INPUT_PARAMS.wall_beam_contact_depth
-            if bearing_area > 0:
-                reaction_force_i = abs(pynite_member.shear('Fy', 0.0, ULS_COMBO))
-                bearing_stress_i = reaction_force_i / bearing_area
-                
-                reaction_force_j = abs(pynite_member.shear('Fy', pynite_member.L(), ULS_COMBO))
-                bearing_stress_j = reaction_force_j / bearing_area
-                
-                bearing_stress_d = max(bearing_stress_i, bearing_stress_j)
-                
-                if material_type == 'wood':
-                    f_compression_perp_d = (material_props['f_c90k'] * k_mod) / gamma_M if gamma_M > 0 else 1e9
-                    ratios['bearing'] = bearing_stress_d / f_compression_perp_d if f_compression_perp_d > 0 else 0
-            
-        valid_ratios = [val for val in ratios.values() if not np.isnan(val)]
-        member_utilization = max(valid_ratios) if valid_ratios else 0.0
+            reaction_force_i = abs(pynite_member.shear('Fy', 0.0, ULS_COMBO))
+            bearing_pressure_i = reaction_force_i / bearing_area
 
-        evaluation_results.append({
+            f_c90d = (material_props['f_c90k'] * factors['k_mod']) / factors['gamma_M']
+            ratios['beam_bearing_i'] = bearing_pressure_i / f_c90d
+
+        if member.node_j in support_node_names or member.node_j in support_node_names:
+            bearing_area = spec.base * INPUT_PARAMS.wall_beam_contact_depth    
+            reaction_force_j = abs(pynite_member.shear('Fy', pynite_member.L(), ULS_COMBO))
+            bearing_pressure_j = reaction_force_j / bearing_area
+
+            f_c90d = (material_props['f_c90k'] * factors['k_mod']) / factors['gamma_M']
+            ratios['beam_bearing_j'] = bearing_pressure_j / f_c90d
+
+        member_evaluations.append({
             'member_name': member.name,
-            'material_id': spec.material_id,
-            'ratios': ratios,
-            'member_utilization': member_utilization
-        })
-
-    all_ratio_keys = {key for res in evaluation_results for key in res['ratios'].keys()}
-    rows = []
-    for res in evaluation_results:
-        row_data = {
-            'member_name': res['member_name'],
-            'material_id': res['material_id'],
-            'member_utilization': res['member_utilization']
-        }
-        for key in all_ratio_keys:
-            row_data[f'ratio_{key}'] = res['ratios'].get(key)
-        rows.append(row_data)
-    results_df = pd.DataFrame(rows)
+            'material_id': member.spec.material_id
+            }.update(ratios))
     
-    return evaluation_results, results_df
+    return pd.DataFrame(member_evaluations)
 
 
 def render(frame, deformed_scale=100, opacity=0.25) -> None:
@@ -815,7 +951,7 @@ if __name__ == '__main__':
     LL_COMBO = 'LL'
     ULS_COMBO = 'ULS_Strength'
 
-    frame, nodes, members = create_model(
+    frame, nodes, members, total_dl, total_ll = create_model(
         east_joists=east_joists,
         west_joists=west_joists,
         tail_joists=tail_joists,
@@ -823,7 +959,6 @@ if __name__ == '__main__':
         header=header,
         planks=planks,
     )
-    member_evaluations = evaluate_stresses(frame, members)
-    print(pd.DataFrame(member_evaluations))
+    member_evaluations = evaluate_stresses(frame, members, total_dl, total_ll)
     total_cost, cuts = calculate_purchase_quantity(frame, members)
     render(frame, deformed_scale=100, opacity=0.25)

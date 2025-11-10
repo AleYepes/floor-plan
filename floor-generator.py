@@ -121,7 +121,6 @@ def _get_eurocode_factors(material_name):
     else:
         raise ValueError("Material not supported")
 
-
 @dataclass
 class CrossSectionProperties:
     A: float
@@ -464,7 +463,9 @@ def apply_loads(frame: FEModel3D, members: List[Member]) -> Tuple[float, float]:
         frame.add_member_dist_load(member.name, 'FZ', live_load, live_load, case=LL_COMBO)
         total_ll_force += live_load * frame.members[member.name].L()
 
-    # Combined load
+    # Declare loads
+    frame.add_load_combo(LL_COMBO, {'LL': 1})
+    frame.add_load_combo(DL_COMBO, {'DL': 1})
     frame.add_load_combo(ULS_COMBO, {'DL': 1.35, 'LL': 1.5})
 
     return total_dl_force, total_ll_force
@@ -796,7 +797,6 @@ def evaluate_stresses(frame: FEModel3D, members: List[Member]):
         material_props = MATERIAL_STRENGTHS[spec.material]
         factors = _get_eurocode_factors(spec.material)
         member_length = pynite_member.L()
-        print(member.name)
 
         # ULS Internal Forces
         max_moment_y = pynite_member.max_moment('My', ULS_COMBO)
@@ -922,10 +922,10 @@ if __name__ == '__main__':
     INPUT_PARAMS, MATERIAL_STRENGTHS, MATERIAL_CATALOG, CONNECTORS, EUROCODE_FACTORS = prep_data()
 
     hyperparams = {
-        'east_joists' : MemberSpec('c24_60x120', quantity=1, padding=0),
-        'tail_joists' : MemberSpec('c24_60x120', quantity=1, padding=0),
-        'west_joists' : MemberSpec('c24_60x120', quantity=1, padding=0),
-        'trimmers' : MemberSpec('c24_60x120', quantity=2),
+        'east_joists' : MemberSpec('c24_60x120', quantity=1, padding=100),
+        'tail_joists' : MemberSpec('c24_60x120', quantity=0, padding=0),
+        'west_joists' : MemberSpec('c24_60x120', quantity=1, padding=100),
+        'trimmers' : MemberSpec('c24_80x160', quantity=2),
         'header' : MemberSpec('c24_60x120', quantity=1),
         'planks' : MemberSpec('c18_200x25'),
         }
@@ -934,7 +934,11 @@ if __name__ == '__main__':
     LL_COMBO = 'LL'
     ULS_COMBO = 'ULS_Strength'
 
+    print('Creating model...')
     frame, nodes, members = create_model(hyperparams)
+    print('Evaluating stresses...')
     member_evaluations = evaluate_stresses(frame, members)
+    print('Calculating cost...')
     total_cost, cuts = calculate_purchase_quantity(frame, members)
+    print('Rendering...')
     render(frame, deformed_scale=100, opacity=0.2, combo_name=ULS_COMBO)

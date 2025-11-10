@@ -32,7 +32,7 @@ class DesignParameters:
     wall_thickness: float
 
     @property
-    def floor_y(self):
+    def floor_z(self):
         return self.room_height / 2
 
     @property
@@ -40,7 +40,7 @@ class DesignParameters:
         return self.room_width + self.wall_beam_contact_depth
     
     @property
-    def opening_z(self):
+    def opening_y(self):
         return self.beam_length - self.opening_width - self.wall_beam_contact_depth/2
 
 
@@ -126,38 +126,38 @@ def _get_eurocode_factors(material_name):
 
 @dataclass
 class CrossSectionProperties:
-    A: float  # Area
-    Iy: float  # Second moment about y-axis
-    Iz: float  # Second moment about z-axis
-    J: float   # Torsional constant
+    A: float
+    Iy: float
+    Iz: float
+    J: float
     
     @classmethod
     def from_rectangular(cls, base: float, height: float) -> 'CrossSectionProperties':
         A = base * height
         b, h = min(base, height), max(base, height)
         J = (b**3 * h) * (1/3 - 0.21 * (b/h) * (1 - (b**4)/(12*h**4)))
-        Iy = (height * base**3) / 12
-        Iz = (base * height**3) / 12
+        Iz = (height * base**3) / 12
+        Iy = (base * height**3) / 12
         return cls(A=A, Iy=Iy, Iz=Iz, J=J)
     
-    @classmethod
-    def from_i_beam(cls, height: float, base: float, flange_thickness: float, web_thickness: float) -> 'CrossSectionProperties':
-        A_flanges = 2 * base * flange_thickness
-        A_web = (height - 2 * flange_thickness) * web_thickness
-        A = A_flanges + A_web
+    # @classmethod
+    # def from_i_beam(cls, height: float, base: float, flange_thickness: float, web_thickness: float) -> 'CrossSectionProperties':
+    #     A_flanges = 2 * base * flange_thickness
+    #     A_web = (height - 2 * flange_thickness) * web_thickness
+    #     A = A_flanges + A_web
         
-        Iz_flanges = 2 * (base * flange_thickness**3 / 12 + 
-                         base * flange_thickness * ((height - flange_thickness)/2)**2)
-        web_height = height - 2 * flange_thickness
-        Iz_web = web_thickness * web_height**3 / 12
-        Iz = Iz_flanges + Iz_web
+    #     Iz_flanges = 2 * (base * flange_thickness**3 / 12 + 
+    #                      base * flange_thickness * ((height - flange_thickness)/2)**2)
+    #     web_height = height - 2 * flange_thickness
+    #     Iz_web = web_thickness * web_height**3 / 12
+    #     Iz = Iz_flanges + Iz_web
         
-        Iy_flanges = 2 * (flange_thickness * base**3 / 12)
-        Iy_web = web_height * web_thickness**3 / 12
-        Iy = Iy_flanges + Iy_web
+    #     Iy_flanges = 2 * (flange_thickness * base**3 / 12)
+    #     Iy_web = web_height * web_thickness**3 / 12
+    #     Iy = Iy_flanges + Iy_web
         
-        J = (2 * base * flange_thickness**3 + web_height * web_thickness**3) / 3
-        return cls(A=A, Iy=Iy, Iz=Iz, J=J)
+    #     J = (2 * base * flange_thickness**3 + web_height * web_thickness**3) / 3
+    #     return cls(A=A, Iy=Iy, Iz=Iz, J=J)
 
 @dataclass
 class MemberSpec:
@@ -182,15 +182,15 @@ class MemberSpec:
     def get_geometry(self) -> CrossSectionProperties:
         if self.shape == 'rectangular':
             return CrossSectionProperties.from_rectangular(self.base, self.height)
-        elif self.shape.startswith('IP'):
-            return CrossSectionProperties.from_i_beam(self.height, self.base, self._catalog_data['flange_thickness'], self._catalog_data['web_thickness'])
+        # elif self.shape.startswith('IP'):
+        #     return CrossSectionProperties.from_i_beam(self.height, self.base, self._catalog_data['flange_thickness'], self._catalog_data['web_thickness'])
         else:
             raise ValueError(f"Unknown shape: {self.shape}")
     
     def create_section(self, frame: FEModel3D):
         if self.section_name not in frame.sections:
             geom = self.get_geometry()
-            frame.add_section(self.section_name, geom.A, geom.Iy, geom.Iz, geom.J)
+            frame.add_section(self.section_name, geom.A, Iy=geom.Iy, Iz=geom.Iz, J=geom.J)
 
 @dataclass
 class NodeLocation:
@@ -252,7 +252,7 @@ def calculate_nodes_and_members(
     opening_x_end = INPUT_PARAMS.opening_x_start + INPUT_PARAMS.opening_length
     trimmer_E_x = INPUT_PARAMS.opening_x_start - (trimmers.base / 2)
     trimmer_W_x = opening_x_end + (trimmers.base / 2)
-    header_z = INPUT_PARAMS.opening_z - header.base/2
+    header_y = INPUT_PARAMS.opening_y - header.base/2
     
     # Beam centerline positions
     beam_positions = {}
@@ -280,42 +280,42 @@ def calculate_nodes_and_members(
     clear_start = INPUT_PARAMS.wall_beam_contact_depth / 2
     clear_end = INPUT_PARAMS.beam_length - INPUT_PARAMS.wall_beam_contact_depth / 2
     planks.quantity = int((clear_end - clear_start) // planks.base)
-    z_positions = _calculate_evenly_spaced_positions(planks.quantity, clear_start-planks.base, clear_end+planks.base, planks.base, 'centered')
-    plank_positions = [(f'p{i}', z) for i, z in enumerate(z_positions)]
+    y_positions = _calculate_evenly_spaced_positions(planks.quantity, clear_start-planks.base, clear_end+planks.base, planks.base, 'centered')
+    plank_positions = [(f'p{i}', y) for i, y in enumerate(y_positions)]
     
     # Beam nodes and member locations
     nodes = []
     members = []
     for group_name, group_positions in beam_positions.items():
         for beam_name, x in group_positions:
-            nodes.append(NodeLocation(f'{beam_name}_S', x, INPUT_PARAMS.floor_y, 0))
-            if group_name == 'tail': # Tails connect to header (header_z), not to wall (beam_length)
-                nodes.append(NodeLocation(f'{beam_name}_header', x, INPUT_PARAMS.floor_y, header_z))
+            nodes.append(NodeLocation(f'{beam_name}_S', x, 0, INPUT_PARAMS.floor_z))
+            if group_name == 'tail': # Tails connect to header (header_y), not to wall (beam_length)
+                nodes.append(NodeLocation(f'{beam_name}_header', x, header_y, INPUT_PARAMS.floor_z))
                 members.append(Member(name=beam_name, node_i=f'{beam_name}_header', node_j=f'{beam_name}_S', spec=east_joists))
             else:
-                nodes.append(NodeLocation(f'{beam_name}_N', x, INPUT_PARAMS.floor_y, INPUT_PARAMS.beam_length))
+                nodes.append(NodeLocation(f'{beam_name}_N', x, INPUT_PARAMS.beam_length, INPUT_PARAMS.floor_z))
                 members.append(Member(name=beam_name, node_i=f'{beam_name}_N', node_j=f'{beam_name}_S', spec=east_joists))
     
-    nodes.append(NodeLocation('headerE', trimmer_E_x, INPUT_PARAMS.floor_y, header_z))
-    nodes.append(NodeLocation('headerW', trimmer_W_x, INPUT_PARAMS.floor_y, header_z))
+    nodes.append(NodeLocation('headerE', trimmer_E_x, header_y, INPUT_PARAMS.floor_z))
+    nodes.append(NodeLocation('headerW', trimmer_W_x, header_y, INPUT_PARAMS.floor_z))
     members.append(Member(name='header', node_i='headerW', node_j='headerE', spec=header))
 
     # Corner nodes
     walls = [('E', 0), ('W', INPUT_PARAMS.room_length)]
     for corner_name, x in walls:
-        nodes.append(NodeLocation(f'{corner_name}_S', x, INPUT_PARAMS.floor_y, 0))
-        nodes.append(NodeLocation(f'{corner_name}_N', x, INPUT_PARAMS.floor_y, INPUT_PARAMS.beam_length))
+        nodes.append(NodeLocation(f'{corner_name}_S', x, 0, INPUT_PARAMS.floor_z))
+        nodes.append(NodeLocation(f'{corner_name}_N', x, INPUT_PARAMS.beam_length, INPUT_PARAMS.floor_z))
 
     # Plank nodes and member locations
     plank_series_dict = {}
     beam_positions['walls'] = walls # So planks extend to walls
-    for plank_name, z in plank_positions:
+    for plank_name, y in plank_positions:
         plank_nodes = []
         for group_positions in beam_positions.values():
             for beam_name, x in group_positions:
-                if x > trimmer_E_x and x < trimmer_W_x and z > header_z:
+                if x > trimmer_E_x and x < trimmer_W_x and y > header_y:
                     continue
-                intersection_node = NodeLocation(f'{beam_name}-{plank_name}', x, INPUT_PARAMS.floor_y, z)
+                intersection_node = NodeLocation(f'{beam_name}-{plank_name}', x, y, INPUT_PARAMS.floor_z)
                 plank_nodes.append(intersection_node)
                 nodes.append(intersection_node)
         plank_series_dict[plank_name] = plank_nodes
@@ -323,7 +323,7 @@ def calculate_nodes_and_members(
     for plank_name, plank_nodes in plank_series_dict.items():
         plank_nodes.sort(key=lambda node: node.X)
         for i, _ in enumerate(plank_nodes[:-1]):
-            if plank_nodes[i].X == trimmer_E_x and plank_nodes[i].Z > header_z:
+            if plank_nodes[i].X == trimmer_E_x and plank_nodes[i].Y > header_y:
                 continue
             members.append(Member(name=f'{plank_name}_{i}', node_i=plank_nodes[i].name, node_j=plank_nodes[i+1].name, spec=planks))
     
@@ -365,8 +365,8 @@ def define_supports(frame, nodes, wall_thickness, material, walls=False) -> None
     supports = {}
     supports['north'] = sorted([n for n in nodes if n.name.endswith('_N')], key=lambda n: n.X)
     supports['south'] = sorted([n for n in nodes if n.name.endswith('_S')], key=lambda n: n.X)
-    supports['east'] = sorted([n for n in nodes if n.name.startswith('E_')], key=lambda n: n.Z)
-    supports['west'] = sorted([n for n in nodes if n.name.startswith('W_')], key=lambda n: n.Z)
+    supports['east'] = sorted([n for n in nodes if n.name.startswith('E_')], key=lambda n: n.Y)
+    supports['west'] = sorted([n for n in nodes if n.name.startswith('W_')], key=lambda n: n.Y)
 
     if walls:
         foundation = []
@@ -374,7 +374,7 @@ def define_supports(frame, nodes, wall_thickness, material, walls=False) -> None
             for node in support_nodes:
                 if node.name not in foundation:
                     foundation.append(node.name)
-                    frame.add_node(f'{node.name}_foundation', node.X, 0, node.Z)
+                    frame.add_node(f'{node.name}_foundation', node.X, node.Y, 0)
 
         for support_side, support_nodes in supports.items():
             for i, _ in enumerate(support_nodes[:-1]):
@@ -411,48 +411,48 @@ def apply_loads(frame: FEModel3D, members: List[Member]) -> Tuple[float, float]:
         geom = member.spec.get_geometry()
         material = MATERIAL_STRENGTHS[member.spec.material]
         dead_load = -geom.A * material['rho']
-        frame.add_member_dist_load(member.name, 'FY', dead_load, dead_load, case=DL_COMBO)
+        frame.add_member_dist_load(member.name, 'FZ', dead_load, dead_load, case=DL_COMBO)
         total_dl_force += dead_load * frame.members[member.name].L()
 
         if member.name.startswith('tail'):
             header = next((m for m in members if m.name.startswith('header')))
             connector = _find_compatible_connector(base=member.spec.base, height=header.spec.height)
-            frame.add_member_pt_load(member.name, 'FY', -connector['weight_N'], 0)
+            frame.add_member_pt_load(member.name, 'FZ', -connector['weight_N'], 0)
             total_dl_force += -connector['weight_N']
         elif member.name.startswith('header'):
             trimmer = next((m for m in members if m.name.startswith('trimmer')))
             connector = _find_compatible_connector(base=member.spec.base, height=trimmer.spec.height)
-            frame.add_member_pt_load(member.name, 'FY', -connector['weight_N'], 0, case=DL_COMBO)
-            frame.add_member_pt_load(member.name, 'FY', -connector['weight_N'], frame.members[member.name].L(), case=DL_COMBO)
+            frame.add_member_pt_load(member.name, 'FZ', -connector['weight_N'], 0, case=DL_COMBO)
+            frame.add_member_pt_load(member.name, 'FZ', -connector['weight_N'], frame.members[member.name].L(), case=DL_COMBO)
             total_dl_force += -connector['weight_N'] * 2
 
     # Live loads
     plank_members = [m for m in members if m.name.startswith('p')]
-    plank_z_values = sorted(set(frame.nodes[m.node_i].Z for m in plank_members))
-    standard_spacing = plank_z_values[1] - plank_z_values[0]
+    plank_y_values = sorted(set(frame.nodes[m.node_i].Y for m in plank_members))
+    standard_spacing = plank_y_values[1] - plank_y_values[0]
     
     tail_planks = []
     for m in plank_members:
         if 'tail' in m.node_i or 'tail' in m.node_j or ('trimmer' in m.node_i and 'trimmer' in m.node_j):
             tail_planks.append(m)
     
-    min_z = min(plank_z_values)
-    max_z = max(plank_z_values)
-    max_tail_plank_z = max(frame.nodes[m.node_i].Z for m in tail_planks)
+    min_y = min(plank_y_values)
+    max_y = max(plank_y_values)
+    max_tail_plank_y = max(frame.nodes[m.node_i].Y for m in tail_planks)
     for member in plank_members:
-        member_z = frame.nodes[member.node_i].Z
+        member_y = frame.nodes[member.node_i].Y
         
-        if member_z == min_z:
+        if member_y == min_y:
             tributary_width = member.spec.base / 2 + standard_spacing / 2
-        elif member_z == max_z:
+        elif member_y == max_y:
             tributary_width = member.spec.base / 2 + standard_spacing / 2
-        elif member_z == max_tail_plank_z and member in tail_planks:
-            tributary_width = INPUT_PARAMS.opening_z - member_z + standard_spacing / 2
+        elif member_y == max_tail_plank_y and member in tail_planks:
+            tributary_width = INPUT_PARAMS.opening_y - member_y + standard_spacing / 2
         else:
             tributary_width = standard_spacing
         
         live_load = -INPUT_PARAMS.live_load_mpa * tributary_width
-        frame.add_member_dist_load(member.name, 'FY', live_load, live_load, case=LL_COMBO)
+        frame.add_member_dist_load(member.name, 'FZ', live_load, live_load, case=LL_COMBO)
         total_ll_force += live_load * frame.members[member.name].L()
 
     # Combined load
@@ -559,9 +559,9 @@ def _calc_bending_moment_capacity(factors, material_props, spec, geometry, membe
     """
     Chapter 4 Bending (EN 1995-1-1, 6.3.3)
     
-    W_y : section modulus about the strong axis (y)
-    W_z : section modulus about the strong axis (z)
-    M_y_crit : critical bending moment about the strong axis (y)
+    W_y : section modulus about the major axis (y)
+    W_z : section modulus about the minor axis (z)
+    M_y_crit : critical bending moment about the major axis (y)
     l_ef : effective length of the beam for a uniformly distributed load
     omega_m_crit : critical bending stress calculated according to the classical theory of lateral stability, using 5-percentile stiffness values (EN 1995-1-1, 6.3.3)
     lambda_rel_m : relative slenderness ratio in bending
@@ -569,11 +569,11 @@ def _calc_bending_moment_capacity(factors, material_props, spec, geometry, membe
     f_mk : characteristic bending strength
     f_md : design value of bending strength
 
-    M_yRd : bending moment capacity about the strong axis (y)
-    M_zRd : bending moment capacity about the weak axis (z)
+    M_yRd : bending moment capacity about the major axis (y)
+    M_zRd : bending moment capacity about the minor axis (z)
     """
-    W_y = geometry.Iy / (spec.height / 2)
-    W_z = geometry.Iz / (spec.base / 2)
+    W_y = geometry.Iy / (spec.base / 2)
+    W_z = geometry.Iz / (spec.height / 2)
     M_y_crit = math.pi * math.sqrt(material_props['E_05'] * geometry.Iz * material_props['G_05'] * geometry.J)
 
     l_ef = member_length * 0.9
@@ -767,7 +767,7 @@ def _calc_compression_bearing_ratio(factors, material_props, spec, pynite_member
     K = 0.45
 
     bearing_area = spec.base * INPUT_PARAMS.wall_beam_contact_depth    
-    reaction_force_j = abs(pynite_member.shear('Fy', member_end, ULS_COMBO))
+    reaction_force_j = abs(pynite_member.shear('Fz', member_end, ULS_COMBO))
     bearing_pressure_j = reaction_force_j / bearing_area
 
     f_c90d_beam = (material_props['f_c90k'] * factors['k_mod']) / factors['gamma_M']
@@ -803,6 +803,10 @@ def evaluate_stresses(frame: FEModel3D, members: List[Member]):
 
         print(f'    Min moment My: {pynite_member.min_moment('My', ULS_COMBO)}')
         print(f'    Min moment Mz: {pynite_member.min_moment('Mz', ULS_COMBO)}')
+        print(f'    Min deflection Dy: {pynite_member.min_deflection('dy', ULS_COMBO)}')
+        print(f'    Min deflection Dz: {pynite_member.min_deflection('dz', ULS_COMBO)}')
+        print(f'    Min shear Fy: {pynite_member.min_shear('Fy', ULS_COMBO)}')
+        print(f'    Min shear Fz: {pynite_member.min_shear('Fz', ULS_COMBO)}')
 
         max_moment_z = pynite_member.max_moment('Mz', ULS_COMBO)
         min_moment_z = pynite_member.min_moment('Mz', ULS_COMBO)
@@ -811,12 +815,10 @@ def evaluate_stresses(frame: FEModel3D, members: List[Member]):
         N_t0Ed = pynite_member.max_axial(ULS_COMBO)
         N_c0Ed = pynite_member.min_axial(ULS_COMBO)
 
-        max_shear_y = pynite_member.max_shear('Fy', ULS_COMBO)
-        min_shear_y = pynite_member.min_shear('Fy', ULS_COMBO)
-        V_Ed = max(abs(max_shear_y), abs(min_shear_y))
+        max_shear_z = pynite_member.max_shear('Fz', ULS_COMBO)
+        min_shear_z = pynite_member.min_shear('Fz', ULS_COMBO)
+        V_Ed = max(abs(max_shear_z), abs(min_shear_z))
 
-        print(f'    Max shear Fy: {pynite_member.max_shear('Fy', ULS_COMBO)}')
-        print(f'    Max shear Fz: {pynite_member.max_shear('Fz', ULS_COMBO)}')
 
         max_torsion = pynite_member.max_torque(ULS_COMBO)
         min_torsion = pynite_member.min_torque(ULS_COMBO)
@@ -878,8 +880,8 @@ def evaluate_stresses(frame: FEModel3D, members: List[Member]):
             ratios['torsion'] = tau_tor_d / (k_shape * f_vd)
 
             # (EN 1995-1-1, 7.2)
-            w_inst_dl = abs(pynite_member.min_deflection('dy', 'DL'))
-            w_inst_ll = abs(pynite_member.min_deflection('dy', 'LL'))
+            w_inst_dl = abs(pynite_member.min_deflection('dz', 'DL'))
+            w_inst_ll = abs(pynite_member.min_deflection('dz', 'LL'))
             w_fin = w_inst_dl * (1 + factors['k_def']) + w_inst_ll * (1 + factors['psi_2'] * factors['k_def'])
             ratios['net_deflection'] = w_fin / (member_length / 300) # 300 is a Spanish suggestion - https://cdn.transportes.gob.es/portal-web-transportes/carreteras/normativa_tecnica/21_eurocodigos/AN_UNE-EN-1995-1-1.pdf
         

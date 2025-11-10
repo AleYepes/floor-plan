@@ -852,7 +852,7 @@ def evaluate_stresses(frame: FEModel3D, members: List[Member]):
             w_inst_dl = abs(pynite_member.min_deflection('dy', 'DL'))
             w_inst_ll = abs(pynite_member.min_deflection('dy', 'LL'))
             w_fin = w_inst_dl * (1 + factors['k_def']) + w_inst_ll * (1 + factors['psi_2'] * factors['k_def'])
-            ratios['net_deflection'] = w_fin / (pynite_member.L() / 225)
+            ratios['net_deflection'] = w_fin / (pynite_member.L() / 300) # 300 is a Spanish suggestion - https://cdn.transportes.gob.es/portal-web-transportes/carreteras/normativa_tecnica/21_eurocodigos/AN_UNE-EN-1995-1-1.pdf
         
         # Bearing Check
         brick_props = MATERIAL_STRENGTHS['brick']

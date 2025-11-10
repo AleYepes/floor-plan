@@ -758,6 +758,27 @@ def _calc_combined_bending_axial_compression_ratio(risk_buckling, M_yRd, M_zRd, 
     return ratio_y, ratio_z
 
 
+def _calc_compression_bearing_ratio(factors, material_props, spec, pynite_member, member_end):
+    brick_props = MATERIAL_STRENGTHS['brick']
+    mortar_props = MATERIAL_STRENGTHS['mortar']
+    brick_gamma_M = 2.2
+    alpha = 0.7
+    beta = 0.3
+    K = 0.45
+
+    bearing_area = spec.base * INPUT_PARAMS.wall_beam_contact_depth    
+    reaction_force_j = abs(pynite_member.shear('Fy', member_end, ULS_COMBO))
+    bearing_pressure_j = reaction_force_j / bearing_area
+
+    f_c90d_beam = (material_props['f_c90k'] * factors['k_mod']) / factors['gamma_M']
+    f_kd = K * brick_props['f_c0k']**alpha * mortar_props['f_c0k']**beta / brick_gamma_M
+
+    beam_bearing_ratio = bearing_pressure_j / f_c90d_beam
+    brick_bearing_ratio = bearing_pressure_j / f_kd
+
+    return beam_bearing_ratio, brick_bearing_ratio
+
+
 def evaluate_stresses(frame: FEModel3D, members: List[Member]):
     # Following chapters in https://www.swedishwood.com/siteassets/5-publikationer/pdfer/sw-design-of-timber-structures-vol2-2022.pdf
 
@@ -772,11 +793,16 @@ def evaluate_stresses(frame: FEModel3D, members: List[Member]):
         geometry = spec.get_geometry()
         material_props = MATERIAL_STRENGTHS[spec.material]
         factors = _get_eurocode_factors(spec.material)
+        member_length = pynite_member.L()
+        print(member.name)
 
         # ULS Internal Forces
         max_moment_y = pynite_member.max_moment('My', ULS_COMBO)
         min_moment_y = pynite_member.min_moment('My', ULS_COMBO)
         M_yEd = max(abs(max_moment_y), abs(min_moment_y))
+
+        print(f'    Min moment My: {pynite_member.min_moment('My', ULS_COMBO)}')
+        print(f'    Min moment Mz: {pynite_member.min_moment('Mz', ULS_COMBO)}')
 
         max_moment_z = pynite_member.max_moment('Mz', ULS_COMBO)
         min_moment_z = pynite_member.min_moment('Mz', ULS_COMBO)
@@ -788,6 +814,9 @@ def evaluate_stresses(frame: FEModel3D, members: List[Member]):
         max_shear_y = pynite_member.max_shear('Fy', ULS_COMBO)
         min_shear_y = pynite_member.min_shear('Fy', ULS_COMBO)
         V_Ed = max(abs(max_shear_y), abs(min_shear_y))
+
+        print(f'    Max shear Fy: {pynite_member.max_shear('Fy', ULS_COMBO)}')
+        print(f'    Max shear Fz: {pynite_member.max_shear('Fz', ULS_COMBO)}')
 
         max_torsion = pynite_member.max_torque(ULS_COMBO)
         min_torsion = pynite_member.min_torque(ULS_COMBO)
@@ -815,7 +844,7 @@ def evaluate_stresses(frame: FEModel3D, members: List[Member]):
                 k_m = 1
 
             # (EN 1995-1-1, 6.1.6)
-            M_yRd, M_zRd = _calc_bending_moment_capacity(factors, material_props, spec, geometry, pynite_member.L())
+            M_yRd, M_zRd = _calc_bending_moment_capacity(factors, material_props, spec, geometry, member_length)
             ratios['bending_y'] = (M_yEd / M_yRd * k_m) + (M_zEd / M_zRd)
             ratios['bending_z'] = (M_yEd / M_yRd) + (M_zEd / M_zRd * k_m)
 
@@ -830,7 +859,7 @@ def evaluate_stresses(frame: FEModel3D, members: List[Member]):
             ratios['bending_axial_tension_ratio_z'] = bending_axial_tension_ratio_z
 
             # (EN 1995-1-1, 6.1.4 - 6.1.5)
-            N_c0Rd, N_c90Rd, k_cy, k_cz, risk_buckling = _calc_axial_compression_capacity(factors, material_props, spec, geometry, pynite_member.L())
+            N_c0Rd, N_c90Rd, k_cy, k_cz, risk_buckling = _calc_axial_compression_capacity(factors, material_props, spec, geometry, member_length)
             ratios['axial_compression_ratio_0'] = N_c0Ed / N_c0Rd
             # ratios['axial_compression_ratio_90'] = N_c90Ed / (N_c90Rd * factors['config_and_deformation_factor_k_c90'])
 
@@ -852,34 +881,18 @@ def evaluate_stresses(frame: FEModel3D, members: List[Member]):
             w_inst_dl = abs(pynite_member.min_deflection('dy', 'DL'))
             w_inst_ll = abs(pynite_member.min_deflection('dy', 'LL'))
             w_fin = w_inst_dl * (1 + factors['k_def']) + w_inst_ll * (1 + factors['psi_2'] * factors['k_def'])
-            ratios['net_deflection'] = w_fin / (pynite_member.L() / 300) # 300 is a Spanish suggestion - https://cdn.transportes.gob.es/portal-web-transportes/carreteras/normativa_tecnica/21_eurocodigos/AN_UNE-EN-1995-1-1.pdf
+            ratios['net_deflection'] = w_fin / (member_length / 300) # 300 is a Spanish suggestion - https://cdn.transportes.gob.es/portal-web-transportes/carreteras/normativa_tecnica/21_eurocodigos/AN_UNE-EN-1995-1-1.pdf
         
         # Bearing Check
-        brick_props = MATERIAL_STRENGTHS['brick']
-        mortar_props = MATERIAL_STRENGTHS['mortar']
-        brick_gamma_M = 2.2
-        alpha = 0.7
-        beta = 0.3
-        K = 0.45
         if member.node_i in support_node_names or member.node_j in support_node_names:
-            bearing_area = spec.base * INPUT_PARAMS.wall_beam_contact_depth
-            reaction_force_i = abs(pynite_member.shear('Fy', 0.0, ULS_COMBO))
-            bearing_pressure_i = reaction_force_i / bearing_area
-
-            f_c90d_beam = (material_props['f_c90k'] * factors['k_mod']) / factors['gamma_M']
-            f_kd = K * brick_props['f_c0k']**alpha * mortar_props['f_c0k']**beta / brick_gamma_M
-            ratios['beam_bearing_i'] = bearing_pressure_i / f_c90d_beam
-            ratios['brick_bearing_i'] = bearing_pressure_i / f_kd
+            beam_bearing_i, brick_bearing_i = _calc_compression_bearing_ratio(factors, material_props, spec, pynite_member, member_end=0)
+            ratios['beam_bearing_i'] = beam_bearing_i
+            ratios['brick_bearing_i'] = brick_bearing_i
 
         if member.node_j in support_node_names or member.node_j in support_node_names:
-            bearing_area = spec.base * INPUT_PARAMS.wall_beam_contact_depth    
-            reaction_force_j = abs(pynite_member.shear('Fy', pynite_member.L(), ULS_COMBO))
-            bearing_pressure_j = reaction_force_j / bearing_area
-
-            f_c90d_beam = (material_props['f_c90k'] * factors['k_mod']) / factors['gamma_M']
-            f_kd = K * brick_props['f_c0k']**alpha * mortar_props['f_c0k']**beta / brick_gamma_M
-            ratios['beam_bearing_j'] = bearing_pressure_j / f_c90d_beam
-            ratios['brick_bearing_j'] = bearing_pressure_j / f_kd
+            beam_bearing_j, brick_bearing_j = _calc_compression_bearing_ratio(factors, material_props, spec, pynite_member, member_end=member_length)
+            ratios['beam_bearing_j'] = beam_bearing_j
+            ratios['brick_bearing_j'] = brick_bearing_j
 
         member_evaluations.append({
             'member_name': member.name,

@@ -657,7 +657,7 @@ def _calc_instability_factor(factors, material_props, geometry, member_length):
 
 def _calc_axial_compression_capacity(factors, material_props, spec, geometry, member_length):
     """
-    Chapter 5.2 Axial Compression
+    Chapter 5.2 Axial Compression (EN 1995-1-1, 6.1.5)
     
     f_c0k : characteristic compression strength parallel to grain
     f_c0d : design compression strength parallel to grain
@@ -803,13 +803,6 @@ def evaluate_stresses(frame: FEModel3D, members: List[Member]):
         min_moment_y = pynite_member.min_moment('My', ULS_COMBO)
         M_yEd = max(abs(max_moment_y), abs(min_moment_y))
 
-        print(f'    Min moment My: {pynite_member.min_moment('My', ULS_COMBO)}')
-        print(f'    Min moment Mz: {pynite_member.min_moment('Mz', ULS_COMBO)}')
-        print(f'    Min deflection Dy: {pynite_member.min_deflection('dy', ULS_COMBO)}')
-        print(f'    Min deflection Dz: {pynite_member.min_deflection('dz', ULS_COMBO)}')
-        print(f'    Min shear Fy: {pynite_member.min_shear('Fy', ULS_COMBO)}')
-        print(f'    Min shear Fz: {pynite_member.min_shear('Fz', ULS_COMBO)}')
-
         max_moment_z = pynite_member.max_moment('Mz', ULS_COMBO)
         min_moment_z = pynite_member.min_moment('Mz', ULS_COMBO)
         M_zEd = max(abs(max_moment_z), abs(min_moment_z))
@@ -887,12 +880,12 @@ def evaluate_stresses(frame: FEModel3D, members: List[Member]):
             ratios['net_deflection'] = w_fin / (member_length / 300) # 300 is a Spanish suggestion - https://cdn.transportes.gob.es/portal-web-transportes/carreteras/normativa_tecnica/21_eurocodigos/AN_UNE-EN-1995-1-1.pdf
         
         # Bearing Check
-        if member.node_i in support_node_names or member.node_j in support_node_names:
+        if member.node_i in support_node_names:
             beam_bearing_i, brick_bearing_i = _calc_compression_bearing_ratio(factors, material_props, spec, pynite_member, member_end=0)
             ratios['beam_bearing_i'] = beam_bearing_i
             ratios['brick_bearing_i'] = brick_bearing_i
 
-        if member.node_j in support_node_names or member.node_j in support_node_names:
+        if member.node_j in support_node_names:
             beam_bearing_j, brick_bearing_j = _calc_compression_bearing_ratio(factors, material_props, spec, pynite_member, member_end=member_length)
             ratios['beam_bearing_j'] = beam_bearing_j
             ratios['brick_bearing_j'] = brick_bearing_j

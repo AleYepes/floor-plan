@@ -84,15 +84,13 @@ def prep_data():
     material_catalog = pd.read_csv('data/material_catalog.csv')
     material_catalog['id'] = (material_catalog['material'] + '_' + material_catalog['base'].astype(str) + 'x' + material_catalog['height'].astype(str))
 
-    ## Add double beams
+    ## Create fitting double beams
     doubled_beams = material_catalog[(material_catalog['type'] == 'beam') & (material_catalog['material'] != 'steel')].copy()
     doubled_beams['base'] = doubled_beams['base'] * 2
     doubled_beams['type'] = 'double'
     doubled_beams['source'] = doubled_beams['id']
     material_catalog = pd.concat([material_catalog, doubled_beams], ignore_index=True)
-
-    rows_to_drop = ((material_catalog['type'] == 'beam') | (material_catalog['type'] == 'double')) & (~material_catalog['base'].isin(connectors['base']))
-    material_catalog = material_catalog[~rows_to_drop]
+    material_catalog['viable_connector'] = material_catalog['base'].isin(connectors['base'])
 
     ## Standardize floor materials to 200mm width
     is_floor = material_catalog['type'] == 'floor'
@@ -410,6 +408,8 @@ def define_supports(frame, nodes, wall_thickness, material, walls=False) -> None
 def _find_compatible_connector(base: float, height: float):
     member_connectors = CONNECTORS[CONNECTORS['base'] == base]
     connector = member_connectors[member_connectors['height'] <= height]
+    if connector.empty:
+        return member_connectors.mean()
     return connector.mean()
     
 
@@ -941,11 +941,11 @@ if __name__ == '__main__':
     INPUT_PARAMS, MATERIAL_STRENGTHS, MATERIAL_CATALOG, CONNECTORS, EUROCODE_FACTORS = prep_data()
 
     hyperparams = {
-        'east_joists' : MemberSpec('c24_60x120', quantity=1, padding=100),
-        'tail_joists' : MemberSpec('c24_60x120', quantity=1, padding=0),
-        'west_joists' : MemberSpec('c24_60x120', quantity=1, padding=100),
-        'trimmers' : MemberSpec('c24_80x160', quantity=2),
-        'header' : MemberSpec('c24_60x120', quantity=1),
+        'east_joists' : MemberSpec('c24_100x120', quantity=1, padding=100),
+        'tail_joists' : MemberSpec('c24_100x120', quantity=1, padding=0),
+        'west_joists' : MemberSpec('c24_100x120', quantity=1, padding=100),
+        'trimmers' : MemberSpec('c24_100x120', quantity=2),
+        'header' : MemberSpec('c24_100x120', quantity=1),
         'planks' : MemberSpec('c18_200x25'),
         }
 
@@ -954,7 +954,7 @@ if __name__ == '__main__':
     ULS_COMBO = 'ULS_Strength'
 
     print('Creating model...')
-    frame, nodes, members = create_model(hyperparams)
+    frame, nodes, members = create_model(hyperparams, walls=True)
     print('Evaluating stresses...')
     member_evaluations = evaluate_stresses(frame, members)
     print('Calculating cost...')

@@ -242,21 +242,22 @@ def calculate_nodes_and_members(hyperparams: dict) -> Tuple[List[NodeLocation], 
     
     # Stairs opening params
     opening_x_end = INPUT_PARAMS.opening_x_start + INPUT_PARAMS.opening_length
-    trimmer_E_x = INPUT_PARAMS.opening_x_start - (hyperparams['trimmers'].base / 2)
-    trimmer_W_x = opening_x_end + (hyperparams['trimmers'].base / 2)
+    trimmer_W_x = INPUT_PARAMS.opening_x_start - (hyperparams['trimmers'].base / 2)
+    trimmer_E_x = opening_x_end + (hyperparams['trimmers'].base / 2)
+
     header_y = INPUT_PARAMS.opening_y - hyperparams['header'].base / 2
     
     # Beam centerline positions
     beam_positions = {}
-    if hyperparams['east_joists'].quantity > 0:
-        clear_start = hyperparams['east_joists'].padding
+    if hyperparams['west_joists'].quantity > 0:
+        clear_start = hyperparams['west_joists'].padding
         clear_end = trimmer_E_x - hyperparams['trimmers'].base / 2
-        x_positions = _calculate_evenly_spaced_positions(hyperparams['east_joists'].quantity,
+        x_positions = _calculate_evenly_spaced_positions(hyperparams['west_joists'].quantity,
                                                          clear_start,
                                                          clear_end,
-                                                         hyperparams['east_joists'].base,
+                                                         hyperparams['west_joists'].base,
                                                          'start_aligned')
-        beam_positions['east_joists'] = [(f'east{i}', x) for i, x in enumerate(x_positions)]
+        beam_positions['west_joists'] = [(f'east{i}', x) for i, x in enumerate(x_positions)]
     
     if hyperparams['tail_joists'].quantity > 0:
         clear_start = INPUT_PARAMS.opening_x_start + hyperparams['tail_joists'].padding
@@ -268,15 +269,15 @@ def calculate_nodes_and_members(hyperparams: dict) -> Tuple[List[NodeLocation], 
                                                          'centered')
         beam_positions['tail_joists'] = [(f'tail{i}', x) for i, x in enumerate(x_positions)]
     
-    if hyperparams['west_joists'].quantity > 0:
+    if hyperparams['east_joists'].quantity > 0:
         clear_start = trimmer_W_x + hyperparams['trimmers'].base / 2
-        clear_end = INPUT_PARAMS.room_length - hyperparams['west_joists'].padding
-        x_positions = _calculate_evenly_spaced_positions(hyperparams['west_joists'].quantity,
+        clear_end = INPUT_PARAMS.room_length - hyperparams['east_joists'].padding
+        x_positions = _calculate_evenly_spaced_positions(hyperparams['east_joists'].quantity,
                                                          clear_start,
                                                          clear_end,
-                                                         hyperparams['west_joists'].base,
+                                                         hyperparams['east_joists'].base,
                                                          'end_aligned')
-        beam_positions['west_joists'] = [(f'west{i}', x) for i, x in enumerate(x_positions)]
+        beam_positions['east_joists'] = [(f'west{i}', x) for i, x in enumerate(x_positions)]
     
     beam_positions['trimmers'] = [('trimmerE', trimmer_E_x), ('trimmerW', trimmer_W_x)]
 
@@ -300,17 +301,17 @@ def calculate_nodes_and_members(hyperparams: dict) -> Tuple[List[NodeLocation], 
             nodes.append(NodeLocation(f'{beam_name}_S', x, 0, INPUT_PARAMS.floor_z))
             if group_name == 'tail_joists': # Tails connect to header (header_y), not to wall (beam_length)
                 nodes.append(NodeLocation(f'{beam_name}_header', x, header_y, INPUT_PARAMS.floor_z))
-                members.append(Member(name=beam_name, node_i=f'{beam_name}_header', node_j=f'{beam_name}_S', spec=spec))
+                members.append(Member(name=beam_name, node_i=f'{beam_name}_S', node_j=f'{beam_name}_header', spec=spec))
             else:
                 nodes.append(NodeLocation(f'{beam_name}_N', x, INPUT_PARAMS.beam_length, INPUT_PARAMS.floor_z))
-                members.append(Member(name=beam_name, node_i=f'{beam_name}_N', node_j=f'{beam_name}_S', spec=spec))
+                members.append(Member(name=beam_name, node_i=f'{beam_name}_S', node_j=f'{beam_name}_N', spec=spec))
     
     nodes.append(NodeLocation('headerE', trimmer_E_x, header_y, INPUT_PARAMS.floor_z))
     nodes.append(NodeLocation('headerW', trimmer_W_x, header_y, INPUT_PARAMS.floor_z))
     members.append(Member(name='header', node_i='headerW', node_j='headerE', spec=hyperparams['header']))
 
     # Corner nodes
-    walls = [('E', 0), ('W', INPUT_PARAMS.room_length)]
+    walls = [('W', 0), ('E', INPUT_PARAMS.room_length)]
     for corner_name, x in walls:
         nodes.append(NodeLocation(f'{corner_name}_S', x, 0, INPUT_PARAMS.floor_z))
         nodes.append(NodeLocation(f'{corner_name}_N', x, INPUT_PARAMS.beam_length, INPUT_PARAMS.floor_z))
@@ -322,7 +323,7 @@ def calculate_nodes_and_members(hyperparams: dict) -> Tuple[List[NodeLocation], 
         plank_nodes = []
         for group_positions in beam_positions.values():
             for beam_name, x in group_positions:
-                if x > trimmer_E_x and x < trimmer_W_x and y > header_y:
+                if x > trimmer_W_x and x < trimmer_E_x and y > header_y:
                     continue
                 intersection_node = NodeLocation(f'{beam_name}-{plank_name}', x, y, INPUT_PARAMS.floor_z)
                 plank_nodes.append(intersection_node)
@@ -332,7 +333,7 @@ def calculate_nodes_and_members(hyperparams: dict) -> Tuple[List[NodeLocation], 
     for plank_name, plank_nodes in plank_series_dict.items():
         plank_nodes.sort(key=lambda node: node.X)
         for i, _ in enumerate(plank_nodes[:-1]):
-            if plank_nodes[i].X == trimmer_E_x and plank_nodes[i].Y > header_y:
+            if plank_nodes[i].X == trimmer_W_x and plank_nodes[i].Y > header_y:
                 continue
             members.append(Member(name=f'{plank_name}_{i}', node_i=plank_nodes[i].name, node_j=plank_nodes[i+1].name, spec=hyperparams['planks']))
     
@@ -942,12 +943,12 @@ if __name__ == '__main__':
     INPUT_PARAMS, MATERIAL_STRENGTHS, MATERIAL_CATALOG, CONNECTORS, EUROCODE_FACTORS = prep_data()
 
     hyperparams = {
-        'east_joists' : MemberSpec('c24_50x120', quantity=1, padding=230),
-        'tail_joists' : MemberSpec('c24_50x120', quantity=0, padding=0),
-        'west_joists' : MemberSpec('c24_45x90', quantity=1, padding=141),
-        'trimmers' : MemberSpec('c24_45x95', quantity=2),
-        'header' : MemberSpec('c24_90x75', quantity=1),
-        'planks' : MemberSpec('c18_200x25'),
+        'east_joists' : MemberSpec('c24_80x160', quantity=1, padding=50),
+        'west_joists' : MemberSpec('c24_45x95', quantity=1, padding=50),
+        'tail_joists' : MemberSpec('c24_60x120', quantity=1, padding=50),
+        'trimmers' : MemberSpec('c24_80x160', quantity=2),
+        'header' : MemberSpec('c24_50x120', quantity=1),
+        'planks' : MemberSpec('osb3_200x15'),
         }
 
     DL_COMBO = 'DL'

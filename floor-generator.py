@@ -1,4 +1,4 @@
-print('Importing libs...')
+print('Starting...')
 
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple, Literal
@@ -13,6 +13,7 @@ from skopt.utils import use_named_args
 import warnings
 import bisect
 import math
+from tqdm import tqdm
 
 from sklearn.linear_model import LinearRegression
 from sklearn.linear_model import HuberRegressor
@@ -941,11 +942,11 @@ if __name__ == '__main__':
     INPUT_PARAMS, MATERIAL_STRENGTHS, MATERIAL_CATALOG, CONNECTORS, EUROCODE_FACTORS = prep_data()
 
     hyperparams = {
-        'east_joists' : MemberSpec('c24_100x120', quantity=1, padding=100),
-        'tail_joists' : MemberSpec('c24_100x120', quantity=1, padding=0),
-        'west_joists' : MemberSpec('c24_100x120', quantity=1, padding=100),
-        'trimmers' : MemberSpec('c24_100x120', quantity=2),
-        'header' : MemberSpec('c24_100x120', quantity=1),
+        'east_joists' : MemberSpec('c24_50x120', quantity=1, padding=230),
+        'tail_joists' : MemberSpec('c24_50x120', quantity=0, padding=0),
+        'west_joists' : MemberSpec('c24_45x90', quantity=1, padding=141),
+        'trimmers' : MemberSpec('c24_45x95', quantity=2),
+        'header' : MemberSpec('c24_90x75', quantity=1),
         'planks' : MemberSpec('c18_200x25'),
         }
 
@@ -953,11 +954,106 @@ if __name__ == '__main__':
     LL_COMBO = 'LL'
     ULS_COMBO = 'ULS_Strength'
 
-    print('Creating model...')
     frame, nodes, members = create_model(hyperparams, walls=True)
-    print('Evaluating stresses...')
     member_evaluations = evaluate_stresses(frame, members)
-    print('Calculating cost...')
     total_cost, cuts = calculate_purchase_quantity(frame, members)
-    print('Rendering...')
     render(frame, deformed_scale=100, opacity=0.2, combo_name=ULS_COMBO)
+
+
+# def progress_callback(res):
+#     pbar.update(1)
+
+# def objective(params):
+#     param_dict = {dimension.name: value for dimension, value in zip(space, params)}
+#     try:
+#         hyperparams = {
+#             'east_joists': MemberSpec(param_dict['east_material'], quantity=param_dict['east_quantity'], padding=param_dict['east_padding']),
+#             'west_joists': MemberSpec(param_dict['west_material'], quantity=param_dict['west_quantity'], padding=param_dict['west_padding']),
+#             'tail_joists': MemberSpec(param_dict['tail_material'], quantity=param_dict['tail_quantity'], padding=param_dict['tail_padding']),
+#             'trimmers': MemberSpec(param_dict['trimmer_material'], quantity=2),
+#             'header': MemberSpec(param_dict['header_material'], quantity=1),
+#             'planks': MemberSpec(param_dict['plank_material']),
+#         }
+
+#         frame, nodes, members = create_model(hyperparams, walls=True)
+#         member_evaluations = evaluate_stresses(frame, members)
+#         total_cost, cuts = calculate_purchase_quantity(frame, members)
+
+#         ratio_cols = [col for col in member_evaluations.columns if member_evaluations[col].dtype == 'float64']
+#         ratios_df = member_evaluations[ratio_cols].replace([np.inf, -np.inf], 1e9)
+        
+#         max_ratio = ratios_df.max().max()
+#         if max_ratio > 1.0:
+#             score = 1e6 * max_ratio 
+#         else:
+#             score = total_cost**2 / ratios_df.mean().mean()
+
+#     except Exception as e:
+#         warnings.warn(f"An exception occurred with params {param_dict}: {e}")
+#         score = 1e12
+#         total_cost = float('inf')
+#         member_evaluations = pd.DataFrame()
+#         cuts = {}
+#         max_ratio = float('inf')
+
+#     run_result = {
+#         **param_dict,
+#         'total_cost': total_cost,
+#         'max_ratio': max_ratio,
+#         'score': score,
+#         'member_evaluations': member_evaluations,
+#         'cuts': cuts,
+#         'score': score,
+#     }
+#     evaluations.append(run_result)
+
+#     return score
+
+
+# if __name__ == '__main__':
+#     # Units are mm, N, and MPa (N/mm²)
+#     INPUT_PARAMS, MATERIAL_STRENGTHS, MATERIAL_CATALOG, CONNECTORS, EUROCODE_FACTORS = prep_data()
+
+#     DL_COMBO = 'DL'
+#     LL_COMBO = 'LL'
+#     ULS_COMBO = 'ULS_Strength'
+    
+#     viable_beams = MATERIAL_CATALOG[MATERIAL_CATALOG['viable_connector']]
+#     beam_ids = viable_beams[viable_beams['type'] == 'beam']['id'].unique().tolist()
+#     double_ids = viable_beams[viable_beams['type'] == 'double']['id'].unique().tolist()
+#     floor_ids = MATERIAL_CATALOG[MATERIAL_CATALOG['type'] == 'floor']['id'].unique().tolist()
+
+#     space = [
+#         Categorical(beam_ids, name='east_material'),
+#         Integer(0, 3, name='east_quantity'),
+#         Integer(0, 800, name='east_padding'),
+#         Categorical(beam_ids, name='west_material'),
+#         Integer(0, 3, name='west_quantity'),
+#         Integer(0, 400, name='west_padding'),
+#         Categorical(beam_ids, name='tail_material'),
+#         Integer(0, 3, name='tail_quantity'),
+#         Integer(0, 800, name='tail_padding'),
+#         Categorical(beam_ids + double_ids, name='trimmer_material'),
+#         Categorical(beam_ids + double_ids, name='header_material'),
+#         Categorical(floor_ids, name='plank_material'),
+#     ]
+
+#     if 'pbar' in globals():
+#         pbar.close()
+
+#     n_initial_points = 2**10
+#     n_calls = round(n_initial_points * 1.2)
+#     pbar = tqdm(total=n_calls)
+
+#     evaluations = []
+#     result = gp_minimize(
+#         func=objective,
+#         dimensions=space,
+#         n_calls=n_calls,
+#         random_state=1,
+#         initial_point_generator='sobol',
+#         n_initial_points=n_initial_points,
+#         callback=[progress_callback]
+#     )
+
+#     pd.DataFrame(evaluations).to_csv('data/results.csv', index=False)

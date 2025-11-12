@@ -1000,11 +1000,11 @@ if __name__ == '__main__':
     INPUT_PARAMS, MATERIAL_STRENGTHS, MATERIAL_CATALOG, CONNECTORS, EUROCODE_FACTORS = prep_data()
 
     hyperparams = {
-        'east_joists' : MemberSpec('c24_45x75', quantity=2, padding=100),
-        'west_joists' : MemberSpec('c24_45x75', quantity=2, padding=100),
-        'tail_joists' : MemberSpec('c24_45x75', quantity=2, padding=0),
-        'trimmers' : MemberSpec('c24_45x75', quantity=2),
-        'header' : MemberSpec('c24_45x75', quantity=1),
+        'east_joists' : MemberSpec('c24_100x200', quantity=2, padding=140),
+        'west_joists' : MemberSpec('c24_100x200', quantity=3, padding=69),
+        'tail_joists' : MemberSpec('c24_50x120', quantity=3, padding=269),
+        'trimmers' : MemberSpec('c24_100x120', quantity=2),
+        'header' : MemberSpec('c24_50x150', quantity=1),
         'planks' : MemberSpec('c18_200x21'),
         }
 
@@ -1073,4 +1073,4 @@ if __name__ == '__main__':
 #         callback=[progress_callback]
 #     )
 
-#     pd.DataFrame(evaluations).to_csv('data/results.csv', index=False)
+    pd.DataFrame(evaluations).to_csv('data/results.csv', index=False)

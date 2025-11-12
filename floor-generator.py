@@ -212,7 +212,8 @@ def calculate_nodes_and_members(hyperparams: dict) -> Tuple[List[NodeLocation], 
         clear_start: float, 
         clear_end: float, 
         member_base: float,
-        distribution: Literal['start_aligned', 'end_aligned', 'centered']) -> List[float]:
+        distribution: Literal['start_aligned', 'end_aligned', 'centered'],
+        tail_padding=None) -> List[float]:
 
         if n == 0:
             return []
@@ -232,6 +233,9 @@ def calculate_nodes_and_members(hyperparams: dict) -> Tuple[List[NodeLocation], 
         elif distribution == 'centered':
             centerline_start = clear_start + member_base / 2
             centerline_end = clear_end - member_base / 2
+            if tail_padding:
+                positions = np.linspace(centerline_start, centerline_end, n).tolist()
+                return positions
             positions = np.linspace(centerline_start, centerline_end, n + 2).tolist()
             return positions[1:-1]
         else:
@@ -266,7 +270,8 @@ def calculate_nodes_and_members(hyperparams: dict) -> Tuple[List[NodeLocation], 
                                                          clear_start,
                                                          clear_end,
                                                          hyperparams['tail_joists'].base,
-                                                         'centered')
+                                                         'centered',
+                                                         tail_padding=hyperparams['tail_joists'].padding)
         beam_positions['tail_joists'] = [(f'tail{i}', x) for i, x in enumerate(x_positions)]
     
     if hyperparams['east_joists'].quantity > 0:
@@ -939,16 +944,67 @@ def render(frame, deformed_scale=100, opacity=0.25, combo_name='ULS_Strength') -
     rndr.render_model()
 
 
+def progress_callback(res):
+    pbar.update(1)
+
+
+def objective(params):
+    param_dict = {dimension.name: value for dimension, value in zip(space, params)}
+    try:
+        hyperparams = {
+            'east_joists': MemberSpec(param_dict['east_material'], quantity=param_dict['east_quantity'], padding=param_dict['east_padding']),
+            'west_joists': MemberSpec(param_dict['west_material'], quantity=param_dict['west_quantity'], padding=param_dict['west_padding']),
+            'tail_joists': MemberSpec(param_dict['tail_material'], quantity=param_dict['tail_quantity'], padding=param_dict['tail_padding']),
+            'trimmers': MemberSpec(param_dict['trimmer_material'], quantity=2),
+            'header': MemberSpec(param_dict['header_material'], quantity=1),
+            'planks': MemberSpec(param_dict['plank_material']),
+        }
+
+        frame, nodes, members = create_model(hyperparams, walls=True)
+        member_evaluations = evaluate_stresses(frame, members)
+        total_cost, cuts = calculate_purchase_quantity(frame, members)
+
+        ratio_cols = [col for col in member_evaluations.columns if member_evaluations[col].dtype == 'float64']
+        ratios_df = member_evaluations[ratio_cols].replace([np.inf, -np.inf], 1e9)
+        
+        max_ratio = ratios_df.max().max()
+        if max_ratio > 1.0:
+            score = 1e6 * max_ratio 
+        else:
+            score = total_cost * ratios_df.mean().mean()
+
+    except Exception as e:
+        warnings.warn(f"An exception occurred with params {param_dict}: {e}")
+        score = 1e12
+        total_cost = float('inf')
+        member_evaluations = pd.DataFrame()
+        cuts = {}
+        max_ratio = float('inf')
+
+    run_result = {
+        **param_dict,
+        'total_cost': total_cost,
+        'max_ratio': max_ratio,
+        'score': score,
+        'member_evaluations': member_evaluations,
+        'cuts': cuts,
+        'score': score,
+    }
+    evaluations.append(run_result)
+
+    return score
+
+
 if __name__ == '__main__':
     # Units are mm, N, and MPa (N/mm²)
     INPUT_PARAMS, MATERIAL_STRENGTHS, MATERIAL_CATALOG, CONNECTORS, EUROCODE_FACTORS = prep_data()
 
     hyperparams = {
-        'east_joists' : MemberSpec('c24_60x120', quantity=2, padding=300),
-        'west_joists' : MemberSpec('c24_60x120', quantity=2, padding=300),
-        'tail_joists' : MemberSpec('c24_60x120', quantity=2, padding=0),
-        'trimmers' : MemberSpec('c24_60x120', quantity=2),
-        'header' : MemberSpec('c24_60x120', quantity=1),
+        'east_joists' : MemberSpec('c24_45x75', quantity=2, padding=100),
+        'west_joists' : MemberSpec('c24_45x75', quantity=2, padding=100),
+        'tail_joists' : MemberSpec('c24_45x75', quantity=2, padding=0),
+        'trimmers' : MemberSpec('c24_45x75', quantity=2),
+        'header' : MemberSpec('c24_45x75', quantity=1),
         'planks' : MemberSpec('c18_200x21'),
         }
 
@@ -960,56 +1016,6 @@ if __name__ == '__main__':
     member_evaluations = evaluate_stresses(frame, members)
     total_cost, cuts = calculate_purchase_quantity(frame, members)
     render(frame, deformed_scale=100, opacity=0.2, combo_name=ULS_COMBO)
-
-
-# def progress_callback(res):
-#     pbar.update(1)
-
-# def objective(params):
-#     param_dict = {dimension.name: value for dimension, value in zip(space, params)}
-#     try:
-#         hyperparams = {
-#             'east_joists': MemberSpec(param_dict['east_material'], quantity=param_dict['east_quantity'], padding=param_dict['east_padding']),
-#             'west_joists': MemberSpec(param_dict['west_material'], quantity=param_dict['west_quantity'], padding=param_dict['west_padding']),
-#             'tail_joists': MemberSpec(param_dict['tail_material'], quantity=param_dict['tail_quantity'], padding=param_dict['tail_padding']),
-#             'trimmers': MemberSpec(param_dict['trimmer_material'], quantity=2),
-#             'header': MemberSpec(param_dict['header_material'], quantity=1),
-#             'planks': MemberSpec(param_dict['plank_material']),
-#         }
-
-#         frame, nodes, members = create_model(hyperparams, walls=True)
-#         member_evaluations = evaluate_stresses(frame, members)
-#         total_cost, cuts = calculate_purchase_quantity(frame, members)
-
-#         ratio_cols = [col for col in member_evaluations.columns if member_evaluations[col].dtype == 'float64']
-#         ratios_df = member_evaluations[ratio_cols].replace([np.inf, -np.inf], 1e9)
-        
-#         max_ratio = ratios_df.max().max()
-#         if max_ratio > 1.0:
-#             score = 1e6 * max_ratio 
-#         else:
-#             score = total_cost / ratios_df.mean().mean()
-
-#     except Exception as e:
-#         warnings.warn(f"An exception occurred with params {param_dict}: {e}")
-#         score = 1e12
-#         total_cost = float('inf')
-#         member_evaluations = pd.DataFrame()
-#         cuts = {}
-#         max_ratio = float('inf')
-
-#     run_result = {
-#         **param_dict,
-#         'total_cost': total_cost,
-#         'max_ratio': max_ratio,
-#         'score': score,
-#         'member_evaluations': member_evaluations,
-#         'cuts': cuts,
-#         'score': score,
-#     }
-#     evaluations.append(run_result)
-
-#     return score
 
 
 # if __name__ == '__main__':
@@ -1027,7 +1033,7 @@ if __name__ == '__main__':
 
 #     max_west_padding = INPUT_PARAMS.opening_x_start / 2
 #     max_east_padding = (INPUT_PARAMS.room_length - (INPUT_PARAMS.opening_x_start + INPUT_PARAMS.opening_length)) / 2
-#     max_tail_padding = INPUT_PARAMS.opening_length / 4
+#     max_tail_padding = INPUT_PARAMS.opening_length / 3
 
 #     beam_max_base = MATERIAL_CATALOG[MATERIAL_CATALOG['id'].isin(beam_ids)].base.max()
 #     max_west_quantity = math.floor(max_west_padding / beam_max_base)

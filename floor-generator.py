@@ -251,13 +251,13 @@ def calculate_nodes_and_members(hyperparams: dict) -> Tuple[List[NodeLocation], 
     beam_positions = {}
     if hyperparams['west_joists'].quantity > 0:
         clear_start = hyperparams['west_joists'].padding
-        clear_end = trimmer_E_x - hyperparams['trimmers'].base / 2
+        clear_end = trimmer_W_x - hyperparams['trimmers'].base / 2
         x_positions = _calculate_evenly_spaced_positions(hyperparams['west_joists'].quantity,
                                                          clear_start,
                                                          clear_end,
                                                          hyperparams['west_joists'].base,
                                                          'start_aligned')
-        beam_positions['west_joists'] = [(f'east{i}', x) for i, x in enumerate(x_positions)]
+        beam_positions['west_joists'] = [(f'west{i}', x) for i, x in enumerate(x_positions)]
     
     if hyperparams['tail_joists'].quantity > 0:
         clear_start = INPUT_PARAMS.opening_x_start + hyperparams['tail_joists'].padding
@@ -270,14 +270,14 @@ def calculate_nodes_and_members(hyperparams: dict) -> Tuple[List[NodeLocation], 
         beam_positions['tail_joists'] = [(f'tail{i}', x) for i, x in enumerate(x_positions)]
     
     if hyperparams['east_joists'].quantity > 0:
-        clear_start = trimmer_W_x + hyperparams['trimmers'].base / 2
+        clear_start = trimmer_E_x + hyperparams['trimmers'].base / 2
         clear_end = INPUT_PARAMS.room_length - hyperparams['east_joists'].padding
         x_positions = _calculate_evenly_spaced_positions(hyperparams['east_joists'].quantity,
                                                          clear_start,
                                                          clear_end,
                                                          hyperparams['east_joists'].base,
                                                          'end_aligned')
-        beam_positions['east_joists'] = [(f'west{i}', x) for i, x in enumerate(x_positions)]
+        beam_positions['east_joists'] = [(f'east{i}', x) for i, x in enumerate(x_positions)]
     
     beam_positions['trimmers'] = [('trimmerE', trimmer_E_x), ('trimmerW', trimmer_W_x)]
 
@@ -429,7 +429,7 @@ def apply_loads(frame: FEModel3D, members: List[Member]) -> Tuple[float, float]:
         if member.name.startswith('tail'):
             header = next((m for m in members if m.name.startswith('header')))
             connector = _find_compatible_connector(base=member.spec.base, height=header.spec.height)
-            frame.add_member_pt_load(member.name, 'FZ', -connector['weight_N'], 0)
+            frame.add_member_pt_load(member.name, 'FZ', -connector['weight_N'], frame.members[member.name].L(), case=DL_COMBO)
             total_dl_force += -connector['weight_N']
         elif member.name.startswith('header'):
             trimmer = next((m for m in members if m.name.startswith('trimmer')))
@@ -932,6 +932,7 @@ def render(frame, deformed_scale=100, opacity=0.25, combo_name='ULS_Strength') -
     rndr.combo_name = combo_name
     rndr.annotation_size = 5
     rndr.render_loads = False
+    rndr.render_nodes = False
     rndr.deformed_shape = True
     rndr.deformed_scale = deformed_scale
     rndr.post_update_callbacks.append(lambda plotter: _set_wall_opacity(plotter, opacity=opacity))
@@ -943,12 +944,12 @@ if __name__ == '__main__':
     INPUT_PARAMS, MATERIAL_STRENGTHS, MATERIAL_CATALOG, CONNECTORS, EUROCODE_FACTORS = prep_data()
 
     hyperparams = {
-        'east_joists' : MemberSpec('c24_80x160', quantity=1, padding=50),
-        'west_joists' : MemberSpec('c24_45x95', quantity=1, padding=50),
-        'tail_joists' : MemberSpec('c24_60x120', quantity=1, padding=50),
-        'trimmers' : MemberSpec('c24_80x160', quantity=2),
-        'header' : MemberSpec('c24_50x120', quantity=1),
-        'planks' : MemberSpec('osb3_200x15'),
+        'east_joists' : MemberSpec('c24_60x120', quantity=2, padding=300),
+        'west_joists' : MemberSpec('c24_60x120', quantity=2, padding=300),
+        'tail_joists' : MemberSpec('c24_60x120', quantity=2, padding=0),
+        'trimmers' : MemberSpec('c24_60x120', quantity=2),
+        'header' : MemberSpec('c24_60x120', quantity=1),
+        'planks' : MemberSpec('c18_200x21'),
         }
 
     DL_COMBO = 'DL'
@@ -987,7 +988,7 @@ if __name__ == '__main__':
 #         if max_ratio > 1.0:
 #             score = 1e6 * max_ratio 
 #         else:
-#             score = total_cost**2 / ratios_df.mean().mean()
+#             score = total_cost / ratios_df.mean().mean()
 
 #     except Exception as e:
 #         warnings.warn(f"An exception occurred with params {param_dict}: {e}")
@@ -1024,16 +1025,25 @@ if __name__ == '__main__':
 #     double_ids = viable_beams[viable_beams['type'] == 'double']['id'].unique().tolist()
 #     floor_ids = MATERIAL_CATALOG[MATERIAL_CATALOG['type'] == 'floor']['id'].unique().tolist()
 
+#     max_west_padding = INPUT_PARAMS.opening_x_start / 2
+#     max_east_padding = (INPUT_PARAMS.room_length - (INPUT_PARAMS.opening_x_start + INPUT_PARAMS.opening_length)) / 2
+#     max_tail_padding = INPUT_PARAMS.opening_length / 4
+
+#     beam_max_base = MATERIAL_CATALOG[MATERIAL_CATALOG['id'].isin(beam_ids)].base.max()
+#     max_west_quantity = math.floor(max_west_padding / beam_max_base)
+#     max_east_quantity = math.floor(max_east_padding / beam_max_base)
+#     max_tail_quantity = math.floor(max_tail_padding / beam_max_base)
+
 #     space = [
 #         Categorical(beam_ids, name='east_material'),
-#         Integer(0, 3, name='east_quantity'),
-#         Integer(0, 800, name='east_padding'),
+#         Integer(1, 4, name='east_quantity'),
+#         Integer(0, max_east_padding, name='east_padding'),
 #         Categorical(beam_ids, name='west_material'),
-#         Integer(0, 3, name='west_quantity'),
-#         Integer(0, 400, name='west_padding'),
+#         Integer(1, 4, name='west_quantity'),
+#         Integer(0, max_west_padding, name='west_padding'),
 #         Categorical(beam_ids, name='tail_material'),
-#         Integer(0, 3, name='tail_quantity'),
-#         Integer(0, 800, name='tail_padding'),
+#         Integer(1, 4, name='tail_quantity'),
+#         Integer(0, max_tail_padding, name='tail_padding'),
 #         Categorical(beam_ids + double_ids, name='trimmer_material'),
 #         Categorical(beam_ids + double_ids, name='header_material'),
 #         Categorical(floor_ids, name='plank_material'),
@@ -1042,7 +1052,7 @@ if __name__ == '__main__':
 #     if 'pbar' in globals():
 #         pbar.close()
 
-#     n_initial_points = 2**10
+#     n_initial_points = 2**9
 #     n_calls = round(n_initial_points * 1.2)
 #     pbar = tqdm(total=n_calls)
 

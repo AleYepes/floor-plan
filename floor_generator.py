@@ -7,13 +7,8 @@ from Pynite.Rendering import Renderer
 import numpy as np
 import pandas as pd
 from collections import defaultdict
-from skopt import gp_minimize
-from skopt.space import Integer, Categorical
-from skopt.utils import use_named_args
-import warnings
 import bisect
 import math
-from tqdm import tqdm
 
 from sklearn.linear_model import LinearRegression
 from sklearn.linear_model import HuberRegressor
@@ -24,13 +19,15 @@ class DesignParameters:
     room_length: float
     room_width: float
     room_height: float
-    plank_thickness: float
     opening_width: float
     opening_length: float
     opening_x_start: float
-    wall_beam_contact_depth: float
     live_load_mpa: float
     wall_thickness: float
+
+    @property
+    def wall_beam_contact_depth(self):
+        return self.wall_thickness / 2 - 2.5
 
     @property
     def floor_z(self):
@@ -925,6 +922,32 @@ def evaluate_stresses(frame: FEModel3D, members: List[Member]):
     return pd.DataFrame(member_evaluations)
 
 
+def group_stresses_by_member(part_evaluations):
+    split_names = part_evaluations['member_name'].str.split('_')
+    part_evaluations['base_name'] = split_names.str[0]
+    part_evaluations['part_num'] = pd.to_numeric(split_names.str[1], errors='coerce').astype('Int8')
+
+    for base_name in part_evaluations[part_evaluations['part_num'].notna()]['base_name'].unique():
+        mask = part_evaluations['base_name'] == base_name
+        parts = part_evaluations.loc[mask].sort_values('part_num')
+        part_nums = parts['part_num'].values
+        gaps = np.where(np.diff(part_nums) > 1)[0]
+
+        group_id = 0
+        current_group = f"{base_name}_{chr(ord('A') + group_id)}"
+        for idx, row_idx in enumerate(parts.index):
+            part_evaluations.at[row_idx, 'member_group'] = current_group
+            if idx in gaps:
+                group_id += 1
+                current_group = f"{base_name}_{chr(ord('A') + group_id)}"
+
+    part_evaluations['member_group'] = part_evaluations['member_group'].fillna(part_evaluations['base_name'])
+    num_cols = part_evaluations.select_dtypes(include=['number']).columns.tolist()
+    member_evaluations = part_evaluations[num_cols + ['member_group']].groupby('member_group').mean()
+
+    return member_evaluations.drop('part_num', axis=1)
+
+
 def render(frame, deformed_scale=100, opacity=0.25, combo_name='ULS_Strength') -> None:
     def _set_wall_opacity(plotter, opacity=0.25):
         for actor in plotter.renderer.actors.values():
@@ -943,134 +966,24 @@ def render(frame, deformed_scale=100, opacity=0.25, combo_name='ULS_Strength') -
     rndr.post_update_callbacks.append(lambda plotter: _set_wall_opacity(plotter, opacity=opacity))
     rndr.render_model()
 
+INPUT_PARAMS, MATERIAL_STRENGTHS, MATERIAL_CATALOG, CONNECTORS, EUROCODE_FACTORS = prep_data()
 
-def progress_callback(res):
-    pbar.update(1)
-
-
-def objective(params):
-    param_dict = {dimension.name: value for dimension, value in zip(space, params)}
-    try:
-        hyperparams = {
-            'east_joists': MemberSpec(param_dict['east_material'], quantity=param_dict['east_quantity'], padding=param_dict['east_padding']),
-            'west_joists': MemberSpec(param_dict['west_material'], quantity=param_dict['west_quantity'], padding=param_dict['west_padding']),
-            'tail_joists': MemberSpec(param_dict['tail_material'], quantity=param_dict['tail_quantity'], padding=param_dict['tail_padding']),
-            'trimmers': MemberSpec(param_dict['trimmer_material'], quantity=2),
-            'header': MemberSpec(param_dict['header_material'], quantity=1),
-            'planks': MemberSpec(param_dict['plank_material']),
-        }
-
-        frame, nodes, members = create_model(hyperparams, walls=True)
-        member_evaluations = evaluate_stresses(frame, members)
-        total_cost, cuts = calculate_purchase_quantity(frame, members)
-
-        ratio_cols = [col for col in member_evaluations.columns if member_evaluations[col].dtype == 'float64']
-        ratios_df = member_evaluations[ratio_cols].replace([np.inf, -np.inf], 1e9)
-        
-        max_ratio = ratios_df.max().max()
-        if max_ratio > 1.0:
-            score = 1e6 * max_ratio 
-        else:
-            score = total_cost * ratios_df.mean().mean()
-
-    except Exception as e:
-        warnings.warn(f"An exception occurred with params {param_dict}: {e}")
-        score = 1e12
-        total_cost = float('inf')
-        member_evaluations = pd.DataFrame()
-        cuts = {}
-        max_ratio = float('inf')
-
-    run_result = {
-        **param_dict,
-        'total_cost': total_cost,
-        'max_ratio': max_ratio,
-        'score': score,
-        'member_evaluations': member_evaluations,
-        'cuts': cuts,
-        'score': score,
-    }
-    evaluations.append(run_result)
-
-    return score
-
+DL_COMBO = 'DL'
+LL_COMBO = 'LL'
+ULS_COMBO = 'ULS_Strength'
 
 if __name__ == '__main__':
     # Units are mm, N, and MPa (N/mm²)
-    INPUT_PARAMS, MATERIAL_STRENGTHS, MATERIAL_CATALOG, CONNECTORS, EUROCODE_FACTORS = prep_data()
-
     hyperparams = {
-        'east_joists' : MemberSpec('c24_100x200', quantity=2, padding=140),
-        'west_joists' : MemberSpec('c24_100x200', quantity=3, padding=69),
-        'tail_joists' : MemberSpec('c24_50x120', quantity=3, padding=269),
-        'trimmers' : MemberSpec('c24_100x120', quantity=2),
-        'header' : MemberSpec('c24_50x150', quantity=1),
-        'planks' : MemberSpec('c18_200x21'),
+        'east_joists' : MemberSpec('c24_80x160', quantity=1, padding=100),
+        'west_joists' : MemberSpec('c24_100x200', quantity=1, padding=200),
+        'tail_joists' : MemberSpec('c24_45x75', quantity=3, padding=200),
+        'trimmers' : MemberSpec('c24_100x200', quantity=2),
+        'header' : MemberSpec('c24_80x160', quantity=1),
+        'planks' : MemberSpec('c18_200x25'),
         }
-
-    DL_COMBO = 'DL'
-    LL_COMBO = 'LL'
-    ULS_COMBO = 'ULS_Strength'
 
     frame, nodes, members = create_model(hyperparams, walls=True)
     member_evaluations = evaluate_stresses(frame, members)
     total_cost, cuts = calculate_purchase_quantity(frame, members)
-    render(frame, deformed_scale=100, opacity=0.2, combo_name=ULS_COMBO)
-
-
-# if __name__ == '__main__':
-#     # Units are mm, N, and MPa (N/mm²)
-#     INPUT_PARAMS, MATERIAL_STRENGTHS, MATERIAL_CATALOG, CONNECTORS, EUROCODE_FACTORS = prep_data()
-
-#     DL_COMBO = 'DL'
-#     LL_COMBO = 'LL'
-#     ULS_COMBO = 'ULS_Strength'
-    
-#     viable_beams = MATERIAL_CATALOG[MATERIAL_CATALOG['viable_connector']]
-#     beam_ids = viable_beams[viable_beams['type'] == 'beam']['id'].unique().tolist()
-#     double_ids = viable_beams[viable_beams['type'] == 'double']['id'].unique().tolist()
-#     floor_ids = MATERIAL_CATALOG[MATERIAL_CATALOG['type'] == 'floor']['id'].unique().tolist()
-
-#     max_west_padding = INPUT_PARAMS.opening_x_start / 2
-#     max_east_padding = (INPUT_PARAMS.room_length - (INPUT_PARAMS.opening_x_start + INPUT_PARAMS.opening_length)) / 2
-#     max_tail_padding = INPUT_PARAMS.opening_length / 3
-
-#     beam_max_base = MATERIAL_CATALOG[MATERIAL_CATALOG['id'].isin(beam_ids)].base.max()
-#     max_west_quantity = math.floor(max_west_padding / beam_max_base)
-#     max_east_quantity = math.floor(max_east_padding / beam_max_base)
-#     max_tail_quantity = math.floor(max_tail_padding / beam_max_base)
-
-#     space = [
-#         Categorical(beam_ids, name='east_material'),
-#         Integer(1, 4, name='east_quantity'),
-#         Integer(0, max_east_padding, name='east_padding'),
-#         Categorical(beam_ids, name='west_material'),
-#         Integer(1, 4, name='west_quantity'),
-#         Integer(0, max_west_padding, name='west_padding'),
-#         Categorical(beam_ids, name='tail_material'),
-#         Integer(1, 4, name='tail_quantity'),
-#         Integer(0, max_tail_padding, name='tail_padding'),
-#         Categorical(beam_ids + double_ids, name='trimmer_material'),
-#         Categorical(beam_ids + double_ids, name='header_material'),
-#         Categorical(floor_ids, name='plank_material'),
-#     ]
-
-#     if 'pbar' in globals():
-#         pbar.close()
-
-#     n_initial_points = 2**9
-#     n_calls = round(n_initial_points * 1.2)
-#     pbar = tqdm(total=n_calls)
-
-#     evaluations = []
-#     result = gp_minimize(
-#         func=objective,
-#         dimensions=space,
-#         n_calls=n_calls,
-#         random_state=1,
-#         initial_point_generator='sobol',
-#         n_initial_points=n_initial_points,
-#         callback=[progress_callback]
-#     )
-
-    pd.DataFrame(evaluations).to_csv('data/results.csv', index=False)
+    render(frame, deformed_scale=1000, opacity=0.2, combo_name=ULS_COMBO)

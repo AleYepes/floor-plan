@@ -1,2 +1,2 @@
-room_length,room_width,room_height,opening_width,opening_length,opening_x_start,wall_beam_contact_depth,live_load_mpa,wall_thickness,plank_thickness
-3000,1870,5465,630,1420,900,40,0.003,80
+room_length,room_width,room_height,opening_width,opening_length,opening_x_start,live_load_mpa,wall_thickness
+3010,1870,5465,630,1420,900,0.003,80

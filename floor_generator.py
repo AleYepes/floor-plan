@@ -27,7 +27,7 @@ class DesignParameters:
 
     @property
     def wall_beam_contact_depth(self):
-        return self.wall_thickness / 2 - 2.5
+        return self.wall_thickness / 2 - (WALL_BRICK_PARAMS.interior_wall_thickness / 2)
 
     @property
     def floor_z(self):
@@ -40,6 +40,20 @@ class DesignParameters:
     @property
     def opening_y(self):
         return self.beam_length - self.opening_width - self.wall_beam_contact_depth/2
+
+@dataclass
+class WallBrickParameters:
+    thickness: float
+    length: float
+    height: float
+    exterior_wall_thickness: float
+    interior_wall_thickness: float
+    cavity_width: float
+    cavity_height: float
+
+    @property
+    def cavity_depth(self):
+        return (self.thickness - (2 * self.exterior_wall_thickness) - self.interior_wall_thickness) / 2
 
 
 def prep_data():
@@ -100,7 +114,13 @@ def prep_data():
     # EUROCODE FACTORS
     eurocode_factors = pd.read_csv('data/eurocode_material_factors.csv').set_index('material_prefix').to_dict(orient='index')
 
-    return input_params, material_str, material_catalog, connectors, eurocode_factors
+    # WALL_BRICK_PARAMS
+    wall_brick_params = pd.read_csv('data/bricks.csv')
+    wall_brick_params['index'] = wall_brick_params['thickness']
+    wall_brick_params = wall_brick_params.set_index('index').to_dict(orient='index')
+    wall_brick_params = WallBrickParameters(**wall_brick_params[input_params.wall_thickness])
+
+    return input_params, material_str, material_catalog, connectors, eurocode_factors, wall_brick_params
 
 
 def _get_eurocode_factors(material_name):
@@ -515,6 +535,26 @@ def calculate_purchase_quantity(frame: FEModel3D, members: List[Member]):
                 stock_parts.insert(new_insertion_index, [member_len])
 
         return len(stock_parts), stock_parts
+    
+    def _calc_wall_cavity_area(beam_base, beam_height):
+        def _calc_total_cavity_size(num_cavities, cavity_size):
+            return num_cavities * cavity_size + (num_cavities-1) * WALL_BRICK_PARAMS.interior_wall_thickness
+
+        num_cavities_x = beam_base // WALL_BRICK_PARAMS.cavity_width
+        while _calc_total_cavity_size(num_cavities_x, WALL_BRICK_PARAMS.cavity_width) < beam_base:
+            num_cavities_x += 1
+        required_opening_width = _calc_total_cavity_size(num_cavities_x, WALL_BRICK_PARAMS.cavity_width)
+
+        num_cavities_y = beam_height // WALL_BRICK_PARAMS.cavity_height
+        while _calc_total_cavity_size(num_cavities_y, WALL_BRICK_PARAMS.cavity_height) < beam_height:
+            num_cavities_y += 1
+        required_opening_height = _calc_total_cavity_size(num_cavities_y, WALL_BRICK_PARAMS.cavity_height)
+
+        cavity_depth = (WALL_BRICK_PARAMS.thickness - (2*WALL_BRICK_PARAMS.exterior_wall_thickness) - WALL_BRICK_PARAMS.interior_wall_thickness) / 2
+
+        return required_opening_width, required_opening_height, cavity_depth
+
+    cavity_width, cavity_height, cavity_depth = _calc_wall_cavity_area(80, 160)
     
     total_cost = 0.0
     materials = defaultdict(list)
@@ -966,7 +1006,7 @@ def render(frame, deformed_scale=100, opacity=0.25, combo_name='ULS_Strength') -
     rndr.post_update_callbacks.append(lambda plotter: _set_wall_opacity(plotter, opacity=opacity))
     rndr.render_model()
 
-INPUT_PARAMS, MATERIAL_STRENGTHS, MATERIAL_CATALOG, CONNECTORS, EUROCODE_FACTORS = prep_data()
+INPUT_PARAMS, MATERIAL_STRENGTHS, MATERIAL_CATALOG, CONNECTORS, EUROCODE_FACTORS, WALL_BRICK_PARAMS = prep_data()
 
 DL_COMBO = 'DL'
 LL_COMBO = 'LL'

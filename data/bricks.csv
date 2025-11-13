@@ -1,0 +1,5 @@
+thickness,length,height,exterior_wall_thickness,interior_wall_thickness,cavity_width,cavity_height
+70,705,515,6,5,24,53
+80,705,515,6,5,27,53
+90,705,515,6,5,32,53
+100,705,515,6,5,39,53

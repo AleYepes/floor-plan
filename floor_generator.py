@@ -94,6 +94,7 @@ def prep_data():
 
     # MATERIAL_CATALOG
     material_catalog = pd.read_csv('data/material_catalog.csv')
+    material_catalog[['base', 'height']] = material_catalog[['base', 'height']].fillna(0).astype(int)
     material_catalog['id'] = (material_catalog['material'] + '_' + material_catalog['base'].astype(str) + 'x' + material_catalog['height'].astype(str))
 
     ## Create fitting double beams
@@ -250,7 +251,7 @@ def calculate_nodes_and_members(hyperparams: dict) -> Tuple[List[NodeLocation], 
         elif distribution == 'centered':
             centerline_start = clear_start + member_base / 2
             centerline_end = clear_end - member_base / 2
-            if tail_padding:
+            if tail_padding and n != 1:
                 positions = np.linspace(centerline_start, centerline_end, n).tolist()
                 return positions
             positions = np.linspace(centerline_start, centerline_end, n + 2).tolist()
@@ -507,7 +508,7 @@ def create_model(hyperparams: dict, walls: bool = True) -> Tuple:
     return frame, nodes, members
 
 
-def calculate_purchase_quantity(frame: FEModel3D, members: List[Member]):
+def calculate_purchase_quantity(frame: FEModel3D, members: List[Member], skip_planks=False):
 
     def _find_optimal_cuts(member_lengths: List[float], stock_length: float):
         member_lengths.sort(reverse=True)
@@ -536,7 +537,8 @@ def calculate_purchase_quantity(frame: FEModel3D, members: List[Member]):
 
         return len(stock_parts), stock_parts
     
-    def _calc_wall_cavity_area(beam_base, beam_height):
+    def _calc_mortar_kg_required(beam_base, beam_height):
+
         def _calc_total_cavity_size(num_cavities, cavity_size):
             return num_cavities * cavity_size + (num_cavities-1) * WALL_BRICK_PARAMS.interior_wall_thickness
 
@@ -550,33 +552,44 @@ def calculate_purchase_quantity(frame: FEModel3D, members: List[Member]):
             num_cavities_y += 1
         required_opening_height = _calc_total_cavity_size(num_cavities_y, WALL_BRICK_PARAMS.cavity_height)
 
-        cavity_depth = (WALL_BRICK_PARAMS.thickness - (2*WALL_BRICK_PARAMS.exterior_wall_thickness) - WALL_BRICK_PARAMS.interior_wall_thickness) / 2
+        wall_niche_volume = required_opening_width * required_opening_height * WALL_BRICK_PARAMS.cavity_depth
+        beam_volume = beam_base * beam_height * WALL_BRICK_PARAMS.cavity_depth
+        req_vol = wall_niche_volume - beam_volume
+        mm_3_per_kg = 1000000 / 1.8 # Calculated from 1.8kg/m ²/mm
 
-        return required_opening_width, required_opening_height, cavity_depth
+        return req_vol/mm_3_per_kg
 
-    cavity_width, cavity_height, cavity_depth = _calc_wall_cavity_area(80, 160)
-    
     total_cost = 0.0
+    mortar_required = 0
     materials = defaultdict(list)
     for member in members:
         pynite_member = frame.members[member.name]
         member_length = float(pynite_member.L())
 
+        # Members
         if member.spec.type == 'double':
             source_id = MATERIAL_CATALOG[MATERIAL_CATALOG['id'] == member.spec.material_id].iloc[0]['source']
             materials[source_id].extend([member_length] * 2)
         else:
+            if skip_planks and member.name.startswith('p'):
+                continue
             material_id = member.spec.material_id
             materials[material_id].extend([member_length])
 
-        if member.name.startswith('tail'):
-            header = next((m for m in members if m.name.startswith('header')))
-            connector = _find_compatible_connector(base=member.spec.base, height=header.spec.height)
-            total_cost += connector['price_unit']
+        # Connectors and mortar
+        if member.name.startswith('p'):
+            continue
         elif member.name.startswith('header'):
             trimmer = next((m for m in members if m.name.startswith('trimmer')))
             connector = _find_compatible_connector(base=member.spec.base, height=trimmer.spec.height)
             total_cost += connector['price_unit'] * 2
+        elif member.name.startswith('tail'):
+            header = next((m for m in members if m.name.startswith('header')))
+            connector = _find_compatible_connector(base=member.spec.base, height=header.spec.height)
+            total_cost += connector['price_unit']
+            mortar_required += _calc_mortar_kg_required(member.spec.base, member.spec.height)
+        else:
+            mortar_required += _calc_mortar_kg_required(member.spec.base, member.spec.height) * 2
 
     all_material_cuts = {}
     for material_id, lengths in materials.items():
@@ -585,6 +598,11 @@ def calculate_purchase_quantity(frame: FEModel3D, members: List[Member]):
         all_material_cuts[material_id] = current_material_cuts
         total_cost += num_beams_to_buy * material_specs['cost_unit']
     
+    mortar = MATERIAL_CATALOG[MATERIAL_CATALOG['type'] == 'mortar'].iloc[0]
+    mortar_units = math.ceil(mortar_required / mortar.weight)
+    all_material_cuts['mortar'] = mortar_required
+    total_cost += mortar_units * mortar.cost_unit
+
     return total_cost, all_material_cuts
 
 
@@ -1015,15 +1033,15 @@ ULS_COMBO = 'ULS_Strength'
 if __name__ == '__main__':
     # Units are mm, N, and MPa (N/mm²)
     hyperparams = {
-        'east_joists' : MemberSpec('c24_80x160', quantity=1, padding=100),
-        'west_joists' : MemberSpec('c24_100x200', quantity=1, padding=200),
-        'tail_joists' : MemberSpec('c24_45x75', quantity=3, padding=200),
-        'trimmers' : MemberSpec('c24_100x200', quantity=2),
-        'header' : MemberSpec('c24_80x160', quantity=1),
+        'east_joists' : MemberSpec('c24_60x120', quantity=1, padding=200),
+        'west_joists' : MemberSpec('c24_60x120', quantity=2, padding=200),
+        'tail_joists' : MemberSpec('c24_60x120', quantity=2, padding=450),
+        'trimmers' : MemberSpec('c24_60x120', quantity=2),
+        'header' : MemberSpec('c24_60x120', quantity=1),
         'planks' : MemberSpec('c18_200x25'),
         }
 
     frame, nodes, members = create_model(hyperparams, walls=True)
     member_evaluations = evaluate_stresses(frame, members)
     total_cost, cuts = calculate_purchase_quantity(frame, members)
-    render(frame, deformed_scale=1000, opacity=0.2, combo_name=ULS_COMBO)
+    render(frame, deformed_scale=100, opacity=0.2, combo_name=ULS_COMBO)

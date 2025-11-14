@@ -259,13 +259,14 @@ def calculate_nodes_and_members(hyperparams: dict) -> Tuple[List[NodeLocation], 
         else:
             raise ValueError(f"Unknown distribution: {distribution}")
 
-    assert hyperparams['trimmers'].quantity == 2, "Must have exactly 2 trimmers"
+    assert hyperparams['trimmerW'].quantity == 1, "Must have exactly 1 west trimmer"
+    assert hyperparams['trimmerE'].quantity == 1, "Must have exactly 1 east trimmer"
     assert hyperparams['header'].quantity == 1, "Must have exactly 1 header"
     
     # Stairs opening params
     opening_x_end = INPUT_PARAMS.opening_x_start + INPUT_PARAMS.opening_length
-    trimmer_W_x = INPUT_PARAMS.opening_x_start - (hyperparams['trimmers'].base / 2)
-    trimmer_E_x = opening_x_end + (hyperparams['trimmers'].base / 2)
+    trimmer_W_x = INPUT_PARAMS.opening_x_start - (hyperparams['trimmerW'].base / 2)
+    trimmer_E_x = opening_x_end + (hyperparams['trimmerE'].base / 2)
 
     header_y = INPUT_PARAMS.opening_y - hyperparams['header'].base / 2
     
@@ -273,7 +274,7 @@ def calculate_nodes_and_members(hyperparams: dict) -> Tuple[List[NodeLocation], 
     beam_positions = {}
     if hyperparams['west_joists'].quantity > 0:
         clear_start = hyperparams['west_joists'].padding
-        clear_end = trimmer_W_x - hyperparams['trimmers'].base / 2
+        clear_end = trimmer_W_x - hyperparams['trimmerW'].base / 2
         x_positions = _calculate_evenly_spaced_positions(hyperparams['west_joists'].quantity,
                                                          clear_start,
                                                          clear_end,
@@ -293,7 +294,7 @@ def calculate_nodes_and_members(hyperparams: dict) -> Tuple[List[NodeLocation], 
         beam_positions['tail_joists'] = [(f'tail{i}', x) for i, x in enumerate(x_positions)]
     
     if hyperparams['east_joists'].quantity > 0:
-        clear_start = trimmer_E_x + hyperparams['trimmers'].base / 2
+        clear_start = trimmer_E_x + hyperparams['trimmerE'].base / 2
         clear_end = INPUT_PARAMS.room_length - hyperparams['east_joists'].padding
         x_positions = _calculate_evenly_spaced_positions(hyperparams['east_joists'].quantity,
                                                          clear_start,
@@ -302,8 +303,6 @@ def calculate_nodes_and_members(hyperparams: dict) -> Tuple[List[NodeLocation], 
                                                          'end_aligned')
         beam_positions['east_joists'] = [(f'east{i}', x) for i, x in enumerate(x_positions)]
     
-    beam_positions['trimmers'] = [('trimmerE', trimmer_E_x), ('trimmerW', trimmer_W_x)]
-
     # Plank centerline positions
     clear_start = INPUT_PARAMS.wall_beam_contact_depth / 2
     clear_end = INPUT_PARAMS.beam_length - INPUT_PARAMS.wall_beam_contact_depth / 2
@@ -315,7 +314,11 @@ def calculate_nodes_and_members(hyperparams: dict) -> Tuple[List[NodeLocation], 
                                                      'centered')
     plank_positions = [(f'p{i}', y) for i, y in enumerate(y_positions)]
     
-    # Beam nodes and member locations
+    # trimmer centerlines
+    beam_positions['trimmerW'] = [('trimmerW', trimmer_W_x)]
+    beam_positions['trimmerE'] = [('trimmerE', trimmer_E_x)]
+
+    # joist nodes and Member creation
     nodes = []
     members = []
     for group_name, group_positions in beam_positions.items():
@@ -460,6 +463,28 @@ def apply_loads(frame: FEModel3D, members: List[Member]) -> Tuple[float, float]:
             frame.add_member_pt_load(member.name, 'FZ', -connector['weight_N'], 0, case=DL_COMBO)
             frame.add_member_pt_load(member.name, 'FZ', -connector['weight_N'], frame.members[member.name].L(), case=DL_COMBO)
             total_dl_force += -connector['weight_N'] * 2
+        elif member.name.startswith('trimmerE'):
+            y1 = INPUT_PARAMS.opening_y
+            y2 = frame.members[member.name].L() - INPUT_PARAMS.wall_beam_contact_depth/2
+
+            stair_angle = 57 # TO-DO: fetch from configs
+            stair_radians = stair_angle * math.pi / 180
+            total_dl_N = 258 # 258 for the stair's packaged weight. TO-DO: fetch from configs
+            total_ll_N = 1200 # 1000 for a big person. TO-DO: fetch from configs
+
+            # Calc forces for upper floor
+            dl_N = math.cos(stair_radians)/2 * total_dl_N
+            ll_N = math.cos(stair_radians)/2 * total_ll_N
+
+            vertical_line_dl = math.sin(stair_radians) * -dl_N / (y2 - y1) 
+            lateral_line_dl = math.cos(stair_radians) * dl_N / (y2 - y1) 
+            frame.add_member_dist_load(member.name, 'FZ', vertical_line_dl, vertical_line_dl, case=DL_COMBO, x1=y1, x2=y2)
+            frame.add_member_dist_load(member.name, 'FY', lateral_line_dl, lateral_line_dl, case=DL_COMBO, x1=y1, x2=y2)
+
+            vertical_line_ll = math.sin(stair_radians) * -ll_N / (y2 - y1) 
+            lateral_line_ll = math.cos(stair_radians) * ll_N / (y2 - y1) 
+            frame.add_member_dist_load(member.name, 'FZ', vertical_line_ll, vertical_line_ll, case=LL_COMBO, x1=y1, x2=y2)
+            frame.add_member_dist_load(member.name, 'FY', lateral_line_ll, lateral_line_ll, case=LL_COMBO, x1=y1, x2=y2)
 
     # Live loads
     plank_members = [m for m in members if m.name.startswith('p')]
@@ -486,13 +511,17 @@ def apply_loads(frame: FEModel3D, members: List[Member]) -> Tuple[float, float]:
         else:
             tributary_width = standard_spacing
         
-        live_load = -INPUT_PARAMS.live_load_mpa * tributary_width
+        if member_y < 600: # 600 is the clear distance of the structural beam hovering above the floor. This beam will take the weight of this region.
+            live_load = -INPUT_PARAMS.live_load_mpa * tributary_width * 0.2 # For the little that fits under the structural beam
+        else:
+            live_load = -INPUT_PARAMS.live_load_mpa * tributary_width
+
         frame.add_member_dist_load(member.name, 'FZ', live_load, live_load, case=LL_COMBO)
         total_ll_force += live_load * frame.members[member.name].L()
 
     # Declare loads
-    frame.add_load_combo(LL_COMBO, {'LL': 1})
     frame.add_load_combo(DL_COMBO, {'DL': 1})
+    frame.add_load_combo(LL_COMBO, {'LL': 1})
     frame.add_load_combo(ULS_COMBO, {'DL': 1.35, 'LL': 1.5})
 
     return total_dl_force, total_ll_force
@@ -1036,7 +1065,8 @@ if __name__ == '__main__':
         'east_joists' : MemberSpec('c24_60x120', quantity=1, padding=200),
         'west_joists' : MemberSpec('c24_60x120', quantity=2, padding=200),
         'tail_joists' : MemberSpec('c24_60x120', quantity=2, padding=450),
-        'trimmers' : MemberSpec('c24_60x120', quantity=2),
+        'trimmerW' : MemberSpec('c24_60x120', quantity=1),
+        'trimmerE' : MemberSpec('c24_60x120', quantity=1),
         'header' : MemberSpec('c24_60x120', quantity=1),
         'planks' : MemberSpec('c18_200x25'),
         }

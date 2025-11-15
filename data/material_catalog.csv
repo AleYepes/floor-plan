@@ -1,11 +1,9 @@
 material,type,base,height,length,shape,cost_unit,flange_thickness,web_thickness,weight,url
 c24,beam,33,70,3000,rectangular,7.66,,,,https://www.obramat.es/productos/viga-pino-macizo-tratamiento-autoclave-300x7x3-3-cm-25059078.html
 c24,beam,35,225,2500,rectangular,29.79,,,,https://www.leroymerlin.es/productos/tablon-viga-madera-maciza-3-5x22-5x250-cm-84026571.html
-c24,beam,45,75,4000,rectangular,9.5,,,,https://www.obramat.es/productos/viga-pino-macizo-tratamiento-autoclave-300x9x4-5-cm-25059073.html
 c24,beam,45,90,3000,rectangular,12.58,,,,https://www.obramat.es/productos/viga-pino-macizo-tratamiento-autoclave-300x9x4-5-cm-25059073.html
 c24,beam,45,95,13500,rectangular,150,,,,https://www.leroymerlin.es/productos/pack-de-6-tablones-viga-madera-de-pino-tratado-45x95x2250-mm-89253053.html
 c24,beam,50,150,3000,rectangular,42.99,,,,https://www.leroymerlin.es/productos/tablon-viga-madera-maciza-tratado-5x15x300-cm-84026567.html
-c24,beam,50,120,4500,rectangular,73.99,,,,https://www.leroymerlin.es/productos/viga-madera-laminada-tratado-5x12x450-cm-84026557.html
 c24,beam,60,120,4000,rectangular,47.49,,,,https://www.obramat.es/productos/viga-pino-laminado-con-tratamiento-autoclave-400x12x6-cm-25059074.html
 c24,beam,80,160,4000,rectangular,69.55,,,,https://www.obramat.es/productos/viga-pino-laminado-con-tratamiento-autoclave-400x16x8-cm-25059072.html
 c24,beam,100,200,2050,rectangular,37.99,,,,https://www.leroymerlin.es/productos/traviesa-de-madera-de-pino-tratada-para-exterior-10x20x205-cm-16718051.html

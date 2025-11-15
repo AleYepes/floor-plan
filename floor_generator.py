@@ -124,6 +124,13 @@ def prep_data():
     return input_params, material_str, material_catalog, connectors, eurocode_factors, wall_brick_params
 
 
+INPUT_PARAMS, MATERIAL_STRENGTHS, MATERIAL_CATALOG, CONNECTORS, EUROCODE_FACTORS, WALL_BRICK_PARAMS = prep_data()
+
+DL_COMBO = 'DL'
+LL_COMBO = 'LL'
+ULS_COMBO = 'ULS_Strength'
+
+
 def _get_eurocode_factors(material_name):
     if material_name.startswith('c'):
         return EUROCODE_FACTORS['c']
@@ -223,7 +230,7 @@ class Member:
     spec: MemberSpec
     
 
-def calculate_nodes_and_members(hyperparams: dict) -> Tuple[List[NodeLocation], List[Member]]:
+def calculate_nodes_and_members(hyperparams: dict, free_tail=False) -> Tuple[List[NodeLocation], List[Member]]:
 
     def _calculate_evenly_spaced_positions(
         n: int, 
@@ -251,7 +258,7 @@ def calculate_nodes_and_members(hyperparams: dict) -> Tuple[List[NodeLocation], 
         elif distribution == 'centered':
             centerline_start = clear_start + member_base / 2
             centerline_end = clear_end - member_base / 2
-            if tail_padding and n != 1:
+            if tail_padding:
                 positions = np.linspace(centerline_start, centerline_end, n).tolist()
                 return positions
             positions = np.linspace(centerline_start, centerline_end, n + 2).tolist()
@@ -282,17 +289,6 @@ def calculate_nodes_and_members(hyperparams: dict) -> Tuple[List[NodeLocation], 
                                                          'start_aligned')
         beam_positions['west_joists'] = [(f'west{i}', x) for i, x in enumerate(x_positions)]
     
-    if hyperparams['tail_joists'].quantity > 0:
-        clear_start = INPUT_PARAMS.opening_x_start + hyperparams['tail_joists'].padding
-        clear_end = opening_x_end - hyperparams['tail_joists'].padding
-        x_positions = _calculate_evenly_spaced_positions(hyperparams['tail_joists'].quantity,
-                                                         clear_start,
-                                                         clear_end,
-                                                         hyperparams['tail_joists'].base,
-                                                         'centered',
-                                                         tail_padding=hyperparams['tail_joists'].padding)
-        beam_positions['tail_joists'] = [(f'tail{i}', x) for i, x in enumerate(x_positions)]
-    
     if hyperparams['east_joists'].quantity > 0:
         clear_start = trimmer_E_x + hyperparams['trimmerE'].base / 2
         clear_end = INPUT_PARAMS.room_length - hyperparams['east_joists'].padding
@@ -302,6 +298,20 @@ def calculate_nodes_and_members(hyperparams: dict) -> Tuple[List[NodeLocation], 
                                                          hyperparams['east_joists'].base,
                                                          'end_aligned')
         beam_positions['east_joists'] = [(f'east{i}', x) for i, x in enumerate(x_positions)]
+    
+    if hyperparams['tail_joists'].quantity > 0:
+        clear_end = opening_x_end - hyperparams['tail_joists'].padding
+        if free_tail:
+            clear_start = INPUT_PARAMS.opening_x_start
+        else:
+            clear_start = INPUT_PARAMS.opening_x_start + hyperparams['tail_joists'].padding
+        x_positions = _calculate_evenly_spaced_positions(hyperparams['tail_joists'].quantity,
+                                                         clear_end,
+                                                         clear_start,
+                                                         hyperparams['tail_joists'].base,
+                                                         'centered',
+                                                         tail_padding=hyperparams['tail_joists'].padding)
+        beam_positions['tail_joists'] = [(f'tail{i}', x) for i, x in enumerate(x_positions)]
     
     # Plank centerline positions
     clear_start = INPUT_PARAMS.wall_beam_contact_depth / 2
@@ -441,7 +451,7 @@ def _find_compatible_connector(base: float, height: float):
     return connector.mean()
     
 
-def apply_loads(frame: FEModel3D, members: List[Member]) -> Tuple[float, float]:
+def apply_loads(frame: FEModel3D, members: List[Member], exclude_loads_under_big_beam=False) -> Tuple[float, float]:
     total_dl_force, total_ll_force = 0.0, 0.0
 
     # Dead loads
@@ -511,7 +521,7 @@ def apply_loads(frame: FEModel3D, members: List[Member]) -> Tuple[float, float]:
         else:
             tributary_width = standard_spacing
         
-        if member_y < 600: # 600 is the clear distance of the structural beam hovering above the floor. This beam will take the weight of this region.
+        if exclude_loads_under_big_beam and member_y < 600: # 600 is the clear distance of the structural beam hovering above the floor. This beam will take the weight of this region.
             live_load = -INPUT_PARAMS.live_load_mpa * tributary_width * 0.2 # For the little that fits under the structural beam
         else:
             live_load = -INPUT_PARAMS.live_load_mpa * tributary_width
@@ -527,12 +537,12 @@ def apply_loads(frame: FEModel3D, members: List[Member]) -> Tuple[float, float]:
     return total_dl_force, total_ll_force
 
 
-def create_model(hyperparams: dict, walls: bool = True) -> Tuple:
+def create_model(hyperparams: dict, walls: bool = True, exclude_loads_under_big_beam=False, free_tail=False) -> Tuple:
     
-    nodes, members = calculate_nodes_and_members(hyperparams)
+    nodes, members = calculate_nodes_and_members(hyperparams, free_tail=free_tail)
     frame = assemble_frame(nodes, members)
     define_supports(frame, nodes, INPUT_PARAMS.wall_thickness, 'brick', walls=walls)
-    total_dl_force, total_ll_force = apply_loads(frame, members)
+    total_dl_force, total_ll_force = apply_loads(frame, members, exclude_loads_under_big_beam=exclude_loads_under_big_beam)
     
     return frame, nodes, members
 
@@ -1005,34 +1015,40 @@ def evaluate_stresses(frame: FEModel3D, members: List[Member]):
             'material_id': member.spec.material_id,
             **ratios
             })
+        
+    part_evaluations = pd.DataFrame(member_evaluations)
     
-    return pd.DataFrame(member_evaluations)
+    return part_evaluations.drop(columns=['material_id']).set_index('member_name')
 
 
-def group_stresses_by_member(part_evaluations):
-    split_names = part_evaluations['member_name'].str.split('_')
+def group_stresses_by_member(raw_part_evaluations, join_planks=False):
+    part_evaluations = raw_part_evaluations.copy()
+    split_names = part_evaluations.index.str.split('_')
     part_evaluations['base_name'] = split_names.str[0]
     part_evaluations['part_num'] = pd.to_numeric(split_names.str[1], errors='coerce').astype('Int8')
 
-    for base_name in part_evaluations[part_evaluations['part_num'].notna()]['base_name'].unique():
-        mask = part_evaluations['base_name'] == base_name
-        parts = part_evaluations.loc[mask].sort_values('part_num')
-        part_nums = parts['part_num'].values
-        gaps = np.where(np.diff(part_nums) > 1)[0]
+    if join_planks:
+        part_evaluations['member_group'] = part_evaluations['base_name'].str.replace(r'\d+', '', regex=True)
+    else:
+        for base_name in part_evaluations[part_evaluations['part_num'].notna()]['base_name'].unique():
+            mask = part_evaluations['base_name'] == base_name
+            parts = part_evaluations.loc[mask].sort_values('part_num')
+            part_nums = parts['part_num'].values
+            gaps = np.where(np.diff(part_nums) > 1)[0]
 
-        group_id = 0
-        current_group = f"{base_name}_{chr(ord('A') + group_id)}"
-        for idx, row_idx in enumerate(parts.index):
-            part_evaluations.at[row_idx, 'member_group'] = current_group
-            if idx in gaps:
-                group_id += 1
-                current_group = f"{base_name}_{chr(ord('A') + group_id)}"
+            group_id = 0
+            current_group = f"{base_name}_{chr(ord('A') + group_id)}"
+            for idx, row_idx in enumerate(parts.index):
+                part_evaluations.at[row_idx, 'member_group'] = current_group
+                if idx in gaps:
+                    group_id += 1
+                    current_group = f"{base_name}_{chr(ord('A') + group_id)}"
 
     part_evaluations['member_group'] = part_evaluations['member_group'].fillna(part_evaluations['base_name'])
     num_cols = part_evaluations.select_dtypes(include=['number']).columns.tolist()
     member_evaluations = part_evaluations[num_cols + ['member_group']].groupby('member_group').mean()
 
-    return member_evaluations.drop('part_num', axis=1)
+    return member_evaluations.drop(columns=['part_num'])
 
 
 def render(frame, deformed_scale=100, opacity=0.25, combo_name='ULS_Strength') -> None:
@@ -1053,25 +1069,20 @@ def render(frame, deformed_scale=100, opacity=0.25, combo_name='ULS_Strength') -
     rndr.post_update_callbacks.append(lambda plotter: _set_wall_opacity(plotter, opacity=opacity))
     rndr.render_model()
 
-INPUT_PARAMS, MATERIAL_STRENGTHS, MATERIAL_CATALOG, CONNECTORS, EUROCODE_FACTORS, WALL_BRICK_PARAMS = prep_data()
-
-DL_COMBO = 'DL'
-LL_COMBO = 'LL'
-ULS_COMBO = 'ULS_Strength'
 
 if __name__ == '__main__':
     # Units are mm, N, and MPa (N/mm²)
     hyperparams = {
-        'east_joists' : MemberSpec('c24_60x120', quantity=1, padding=200),
-        'west_joists' : MemberSpec('c24_60x120', quantity=2, padding=200),
-        'tail_joists' : MemberSpec('c24_60x120', quantity=2, padding=450),
-        'trimmerW' : MemberSpec('c24_60x120', quantity=1),
-        'trimmerE' : MemberSpec('c24_60x120', quantity=1),
-        'header' : MemberSpec('c24_60x120', quantity=1),
+        'east_joists' : MemberSpec('c24_80x160', quantity=1, padding=181),
+        'west_joists' : MemberSpec('c24_80x160', quantity=1, padding=161),
+        'tail_joists' : MemberSpec('c24_45x90', quantity=1, padding=643),
+        'trimmerW' : MemberSpec('c24_80x160', quantity=1),
+        'trimmerE' : MemberSpec('c24_80x160', quantity=1),
+        'header' : MemberSpec('c24_45x90', quantity=1),
         'planks' : MemberSpec('c18_200x25'),
         }
 
-    frame, nodes, members = create_model(hyperparams, walls=True)
+    frame, nodes, members = create_model(hyperparams, walls=True, exclude_loads_under_big_beam=True, free_tail=False)
     member_evaluations = evaluate_stresses(frame, members)
     total_cost, cuts = calculate_purchase_quantity(frame, members)
     render(frame, deformed_scale=100, opacity=0.2, combo_name=ULS_COMBO)

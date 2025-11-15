@@ -447,6 +447,8 @@ def _find_compatible_connector(base: float, height: float):
     member_connectors = CONNECTORS[CONNECTORS['base'] == base]
     connector = member_connectors[member_connectors['height'] <= height]
     if connector.empty:
+        if member_connectors.empty:
+            return CONNECTORS.mean()
         return member_connectors.mean()
     return connector.mean()
     
@@ -997,7 +999,8 @@ def evaluate_stresses(frame: FEModel3D, members: List[Member]):
             w_inst_dl = abs(pynite_member.min_deflection('dz', 'DL'))
             w_inst_ll = abs(pynite_member.min_deflection('dz', 'LL'))
             w_fin = w_inst_dl * (1 + factors['k_def']) + w_inst_ll * (1 + factors['psi_2'] * factors['k_def'])
-            ratios['net_deflection'] = w_fin / (member_length / 300) # 300 is a Spanish suggestion - https://cdn.transportes.gob.es/portal-web-transportes/carreteras/normativa_tecnica/21_eurocodigos/AN_UNE-EN-1995-1-1.pdf
+            ratios['net_deflection'] = w_fin
+            ratios['deflection'] = w_fin / (member_length / 300) # 300 is a Spanish suggestion - https://cdn.transportes.gob.es/portal-web-transportes/carreteras/normativa_tecnica/21_eurocodigos/AN_UNE-EN-1995-1-1.pdf
         
         # Bearing Check
         if member.node_i in support_node_names:
@@ -1073,16 +1076,18 @@ def render(frame, deformed_scale=100, opacity=0.25, combo_name='ULS_Strength') -
 if __name__ == '__main__':
     # Units are mm, N, and MPa (N/mm²)
     hyperparams = {
-        'east_joists' : MemberSpec('c24_80x160', quantity=1, padding=181),
-        'west_joists' : MemberSpec('c24_80x160', quantity=1, padding=161),
-        'tail_joists' : MemberSpec('c24_45x90', quantity=1, padding=643),
+        'east_joists' : MemberSpec('c24_80x160', quantity=1, padding=172),
+        'west_joists' : MemberSpec('c24_80x160', quantity=1, padding=164),
+        'tail_joists' : MemberSpec('c24_45x90', quantity=1, padding=0),
         'trimmerW' : MemberSpec('c24_80x160', quantity=1),
         'trimmerE' : MemberSpec('c24_80x160', quantity=1),
         'header' : MemberSpec('c24_45x90', quantity=1),
         'planks' : MemberSpec('c18_200x25'),
         }
 
+
     frame, nodes, members = create_model(hyperparams, walls=True, exclude_loads_under_big_beam=True, free_tail=False)
     member_evaluations = evaluate_stresses(frame, members)
     total_cost, cuts = calculate_purchase_quantity(frame, members)
+    print(total_cost)
     render(frame, deformed_scale=100, opacity=0.2, combo_name=ULS_COMBO)

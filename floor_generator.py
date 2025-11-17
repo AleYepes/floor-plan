@@ -1076,18 +1076,16 @@ def render(frame, deformed_scale=100, opacity=0.25, combo_name='ULS_Strength') -
 if __name__ == '__main__':
     # Units are mm, N, and MPa (N/mm²)
     hyperparams = {
-        'east_joists' : MemberSpec('c24_80x160', quantity=1, padding=172),
-        'west_joists' : MemberSpec('c24_80x160', quantity=1, padding=164),
-        'tail_joists' : MemberSpec('c24_45x90', quantity=1, padding=0),
+        'east_joists' : MemberSpec('c24_80x160', quantity=1, padding=190),
+        'west_joists' : MemberSpec('c24_60x120', quantity=1, padding=140),
+        'tail_joists' : MemberSpec('c24_80x160', quantity=1, padding=0),
         'trimmerW' : MemberSpec('c24_80x160', quantity=1),
         'trimmerE' : MemberSpec('c24_80x160', quantity=1),
-        'header' : MemberSpec('c24_45x90', quantity=1),
+        'header' : MemberSpec('c24_60x120', quantity=1),
         'planks' : MemberSpec('c18_200x25'),
         }
-
 
     frame, nodes, members = create_model(hyperparams, walls=True, exclude_loads_under_big_beam=True, free_tail=False)
     member_evaluations = evaluate_stresses(frame, members)
     total_cost, cuts = calculate_purchase_quantity(frame, members)
-    print(total_cost)
     render(frame, deformed_scale=100, opacity=0.2, combo_name=ULS_COMBO)

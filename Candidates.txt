@@ -1,30 +1,12 @@
-    hyperparams = {
-        'east_joists' : MemberSpec('c24_100x200', quantity=1, padding=240),
-        'west_joists' : MemberSpec('c24_60x120', quantity=1, padding=150),
-        'tail_joists' : MemberSpec('c24_45x90', quantity=1, padding=530),
-        'trimmerW' : MemberSpec('c24_100x200', quantity=1),
-        'trimmerE' : MemberSpec('c24_60x120', quantity=1),
-        'header' : MemberSpec('c24_45x90', quantity=1),
-        'planks' : MemberSpec('c18_200x25'),
-        }
 
 
-    hyperparams = {
-        'east_joists' : MemberSpec('c24_80x160', quantity=1, padding=190),
-        'west_joists' : MemberSpec('c24_80x160', quantity=1, padding=165),
-        'tail_joists' : MemberSpec('c24_45x90', quantity=1, padding=645),
-        'trimmerW' : MemberSpec('c24_80x160', quantity=1),
-        'trimmerE' : MemberSpec('c24_80x160', quantity=1),
-        'header' : MemberSpec('c24_45x90', quantity=1),
-        'planks' : MemberSpec('c18_200x25'),
-        }
 
 hyperparams = {
-    'east_joists' : MemberSpec('c24_80x160', quantity=1, padding=172),
-    'west_joists' : MemberSpec('c24_80x160', quantity=1, padding=164),
-    'tail_joists' : MemberSpec('c24_45x90', quantity=1, padding=0),
+    'east_joists' : MemberSpec('c24_80x160', quantity=1, padding=190),
+    'west_joists' : MemberSpec('c24_60x120', quantity=1, padding=130),
+    'tail_joists' : MemberSpec('c24_80x160', quantity=1, padding=0),
     'trimmerW' : MemberSpec('c24_80x160', quantity=1),
     'trimmerE' : MemberSpec('c24_80x160', quantity=1),
-    'header' : MemberSpec('c24_45x90', quantity=1),
+    'header' : MemberSpec('c24_60x120', quantity=1),
     'planks' : MemberSpec('c18_200x25'),
     }
